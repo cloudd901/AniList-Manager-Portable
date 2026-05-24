@@ -1,0 +1,30 @@
+# Node / Vite
+web/node_modules/
+web/dist/
+
+# .NET build output
+native/bin/
+native/obj/
+native/Generated/WebAssets.g.cs
+
+# Portable release/test output and runtime data
+release/
+data/
+.runtime/
+
+# Local secrets and environment overrides
+.env
+.env.*
+*.user
+*.suo
+
+# Logs and transient files
+*.log
+*.tmp
+*.cache
+
+# OS/editor state
+.DS_Store
+Thumbs.db
+.vs/
+.vscode/
