@@ -283,7 +283,7 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             var refresh = query.TryGetValue("refresh", out var refreshValue) && refreshValue.Equals("true", StringComparison.OrdinalIgnoreCase);
             var list = await aniList.GetListEntriesAsync(status, type, cancellationToken);
             var cacheOnly = query.TryGetValue("cacheOnly", out var cacheOnlyValue) && cacheOnlyValue.Equals("true", StringComparison.OrdinalIgnoreCase);
-            await SendAvailabilityAsync(context, list.Entries, refresh, false, cacheOnly, status, type, cancellationToken);
+            await SendAvailabilityAsync(context, list.Entries, refresh, false, cacheOnly, false, status, type, cancellationToken);
             return;
         }
         if (method == "GET" && path == "/api/availability/overrides")
@@ -298,7 +298,8 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             var refresh = JsonUtil.Bool(input, "refresh") == true;
             var force = JsonUtil.Bool(input, "force") == true;
             var cacheOnly = JsonUtil.Bool(input, "cacheOnly") == true;
-            await SendAvailabilityAsync(context, entries, refresh, force, cacheOnly, null, null, cancellationToken);
+            var usableCacheOnly = JsonUtil.Bool(input, "usableCacheOnly") == true;
+            await SendAvailabilityAsync(context, entries, refresh, force, cacheOnly, usableCacheOnly, null, null, cancellationToken);
             return;
         }
         if (method == "POST" && path == "/api/ratings/batch")
@@ -433,7 +434,7 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         return settings;
     }
 
-    private async Task SendAvailabilityAsync(HttpListenerContext context, JsonArray entries, bool refresh, bool force, bool cacheOnly, string? status, string? type, CancellationToken cancellationToken)
+    private async Task SendAvailabilityAsync(HttpListenerContext context, JsonArray entries, bool refresh, bool force, bool cacheOnly, bool usableCacheOnly, string? status, string? type, CancellationToken cancellationToken)
     {
         if (entries.Count > 25 && status is null)
         {
@@ -446,12 +447,22 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         var warningLock = new object();
         var cachedCount = 0;
         var checkedCount = 0;
-        var semaphore = new SemaphoreSlim(3);
+        var semaphore = new SemaphoreSlim(6);
         var tasks = entries.OfType<JsonObject>().Select(async entry =>
         {
             await semaphore.WaitAsync(cancellationToken);
             try
             {
+                if (usableCacheOnly)
+                {
+                    var reusableCachedOnly = availability.GetReusableCachedResult(entry, false, cache);
+                    if (reusableCachedOnly is not null)
+                    {
+                        Interlocked.Increment(ref cachedCount);
+                    }
+                    return reusableCachedOnly;
+                }
+
                 if (cacheOnly)
                 {
                     var cachedOnly = availability.GetCachedResult(entry, cache);
@@ -502,6 +513,11 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             }
         }
         availability.WriteCache(cache);
+        var warningCount = warnings.Count;
+        var rateLimited = warnings.OfType<JsonObject>().Any(warning =>
+            (JsonUtil.String(warning, "error") ?? "").Contains("429", StringComparison.OrdinalIgnoreCase) ||
+            (JsonUtil.String(warning, "error") ?? "").Contains("rate limit", StringComparison.OrdinalIgnoreCase) ||
+            (JsonUtil.String(warning, "error") ?? "").Contains("rate_limited", StringComparison.OrdinalIgnoreCase));
 
         var response = new JsonObject
         {
@@ -509,10 +525,13 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             ["providerUrl"] = "https://allanime-api.shashankbhake.codes",
             ["entries"] = results,
             ["warnings"] = warnings,
+            ["warningCount"] = warningCount,
+            ["rateLimited"] = rateLimited,
             ["cached"] = cachedCount,
             ["checked"] = checkedCount,
             ["force"] = force,
-            ["cacheOnly"] = cacheOnly
+            ["cacheOnly"] = cacheOnly,
+            ["usableCacheOnly"] = usableCacheOnly
         };
         if (status is not null)
         {

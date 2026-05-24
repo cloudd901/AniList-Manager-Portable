@@ -570,12 +570,18 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
         }
 
         var providerMax = Math.Max(JsonUtil.Int(match.Candidate, "episodes_sub") ?? 0, JsonUtil.Int(match.Candidate, "episodes_dub") ?? 0);
-        var providerSub = JsonUtil.Int(match.Candidate, "episodes_sub") ?? 0;
-        var providerDub = JsonUtil.Int(match.Candidate, "episodes_dub") ?? 0;
         var entryTotal = JsonUtil.Int(entry, "totalEpisodes") ?? 0;
-        return match.Confidence != "high" ||
-            (providerSub > 0 && providerDub > 0 && providerSub != providerDub) ||
-            (entryTotal > 0 && providerMax > 0 && providerMax != entryTotal);
+        if (entryTotal <= 0 || providerMax <= 0)
+        {
+            return true;
+        }
+
+        if (match.Confidence != "high")
+        {
+            return true;
+        }
+
+        return Math.Abs(providerMax - entryTotal) > 1;
     }
 
     private async Task<JsonObject?> ResolveMalInfoAsync(JsonObject entry, CancellationToken cancellationToken)

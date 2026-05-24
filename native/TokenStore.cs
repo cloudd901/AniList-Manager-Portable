@@ -14,6 +14,7 @@ internal sealed class TokenStore(AppPaths paths)
 {
     private static readonly HashSet<string> ColorModes = ["light", "soft", "dim", "dark", "system"];
     private static readonly HashSet<string> AccentThemes = ["blue", "teal", "rose"];
+    private static readonly HashSet<string> AlertIcons = ["triangle", "beacon", "bolt", "dot", "green-dot"];
 
     public TokenState Resolve()
     {
@@ -98,6 +99,13 @@ internal sealed class TokenStore(AppPaths paths)
                     AccentThemes,
                     "Appearance accent theme must be blue, teal, or rose.");
             }
+            if (appearanceInput.ContainsKey("alertIcon"))
+            {
+                currentAppearance["alertIcon"] = ValidateAppearanceValue(
+                    JsonUtil.String(appearanceInput, "alertIcon"),
+                    AlertIcons,
+                    "Appearance alert icon must be triangle, beacon, bolt, dot, or green-dot.");
+            }
             config["appearance"] = currentAppearance;
         }
         config["updatedAt"] = DateTimeOffset.UtcNow.ToString("O");
@@ -108,7 +116,8 @@ internal sealed class TokenStore(AppPaths paths)
     private static JsonObject PublicAppearance(JsonObject? appearance) => new()
     {
         ["colorMode"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "colorMode"), ColorModes, "light"),
-        ["accentTheme"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "accentTheme"), AccentThemes, "blue")
+        ["accentTheme"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "accentTheme"), AccentThemes, "blue"),
+        ["alertIcon"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "alertIcon"), AlertIcons, "green-dot")
     };
 
     private static string NormalizedAppearanceValue(string? value, HashSet<string> allowedValues, string fallback)

@@ -46,8 +46,8 @@ const SORT_OPTIONS = [
   { value: "notes", label: "Notes" },
   { value: "rating", label: "Class Rating" }
 ];
-const AVAILABILITY_CHUNK_SIZE = 12;
-const AVAILABILITY_MIN_CHUNK_SIZE = 3;
+const ADD_SEARCH_LIMIT_OPTIONS = ["all", "200", "100", "50", "20"];
+const AVAILABILITY_CHUNK_SIZE = 25;
 const RATING_CHUNK_SIZE = 4;
 const RATING_BATCH_DELAY_MS = 500;
 const AUTO_AVAILABILITY_COOLDOWN_MS = 60 * 60 * 1000;
@@ -64,6 +64,13 @@ const ACCENT_THEMES = [
   { value: "blue", label: "Blue" },
   { value: "teal", label: "Teal" },
   { value: "rose", label: "Rose" }
+];
+const ALERT_ICON_OPTIONS = [
+  { value: "triangle", label: "Warning" },
+  { value: "beacon", label: "Beacon" },
+  { value: "bolt", label: "Bolt" },
+  { value: "dot", label: "Dot" },
+  { value: "green-dot", label: "Green Dot" }
 ];
 const FORMAT_LABELS = {
   TV: "Series",
@@ -89,7 +96,8 @@ function defaultSettings() {
     showNotes: false,
     appearance: {
       colorMode: "light",
-      accentTheme: "blue"
+      accentTheme: "blue",
+      alertIcon: "green-dot"
     },
     watchNow: {
       selectedServerId: "",
@@ -109,7 +117,8 @@ function normalizeSettings(settings) {
     showNotes: settings?.showNotes === true,
     appearance: {
       colorMode: COLOR_MODES.some((mode) => mode.value === appearance.colorMode) ? appearance.colorMode : "light",
-      accentTheme: ACCENT_THEMES.some((theme) => theme.value === appearance.accentTheme) ? appearance.accentTheme : "blue"
+      accentTheme: ACCENT_THEMES.some((theme) => theme.value === appearance.accentTheme) ? appearance.accentTheme : "blue",
+      alertIcon: ALERT_ICON_OPTIONS.some((option) => option.value === appearance.alertIcon) ? appearance.alertIcon : "green-dot"
     },
     watchNow: {
       selectedServerId: watchNow.selectedServerId || "",
@@ -665,6 +674,46 @@ function markAutoAvailability(status) {
   }
 }
 
+function titleMatchesQuery(entry, query) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return true;
+  }
+  return [entry.title, entry.romajiTitle, entry.englishTitle, entry.nativeTitle]
+    .filter(Boolean)
+    .some((title) => String(title).toLowerCase().includes(normalizedQuery));
+}
+
+function isUnreleased(entry) {
+  return entry.mediaStatus === "NOT_YET_RELEASED";
+}
+
+function restoreWindowScroll({ top, left, shouldContinue }) {
+  if (!Number.isFinite(top)) {
+    return;
+  }
+  const scrollLeft = Number.isFinite(left) ? left : window.scrollX;
+  let attempts = 0;
+
+  function restore() {
+    if (shouldContinue && !shouldContinue()) {
+      return;
+    }
+    window.scrollTo({ left: scrollLeft, top });
+    attempts += 1;
+    if (attempts < 8) {
+      window.requestAnimationFrame(restore);
+    }
+  }
+
+  window.requestAnimationFrame(restore);
+  window.setTimeout(() => {
+    if (!shouldContinue || shouldContinue()) {
+      window.scrollTo({ left: scrollLeft, top });
+    }
+  }, 150);
+}
+
 function ProgressControl({ entry, onUpdate, onRefreshNeeded, shouldRefreshAtTotal }) {
   const total = entry.totalEpisodes;
   const [value, setValue] = useState(String(entry.progress));
@@ -752,7 +801,9 @@ function ScoreControl({ entry, onUpdate }) {
         method: "PATCH",
         body: JSON.stringify({ score: normalized })
       });
-      onUpdate(payload.entry);
+      const preserveScrollY = window.scrollY;
+      const preserveScrollX = window.scrollX;
+      onUpdate(payload.entry, { preserveScrollY, preserveScrollX });
     } finally {
       setSaving(false);
     }
@@ -957,18 +1008,26 @@ function availabilityAlertState(entry, availability, activeStatus, watchNow) {
   };
 }
 
-function AvailabilityAlertIcon({ label }) {
+function alertIconOption(iconId) {
+  return ALERT_ICON_OPTIONS.find((option) => option.value === iconId) || ALERT_ICON_OPTIONS[0];
+}
+
+function AvailabilityAlertIcon({ label, iconId = ALERT_ICON_OPTIONS[0].value }) {
   if (!label) {
     return null;
   }
+  const iconOption = alertIconOption(iconId);
   return (
-    <span className="availability-alert-icon" role="img" aria-label={label} title={label}>
-      !
-    </span>
+    <span
+      className={`availability-alert-icon availability-alert-icon-${iconOption.value}`}
+      role="img"
+      aria-label={label}
+      title={label}
+    />
   );
 }
 
-function AvailabilityBadge({ entry, availability, activeStatus, watchNow, onEdit }) {
+function AvailabilityBadge({ entry, availability, activeStatus, watchNow, alertIconId, onEdit }) {
   function editOverride(event) {
     event.preventDefault();
     onEdit?.(entry, availability);
@@ -1021,7 +1080,7 @@ function AvailabilityBadge({ entry, availability, activeStatus, watchNow, onEdit
         [{total}] Sub {availability.subEpisodes ?? "?"}
         {hasDub ? ` / Dub ${availability.dubEpisodes}` : ""}
       </span>
-      <AvailabilityAlertIcon label={alertLabel} />
+      <AvailabilityAlertIcon label={alertLabel} iconId={alertIconId} />
     </span>
   );
 }
@@ -1379,7 +1438,7 @@ function FocusedEntryPreview({ entry, origin, onClose }) {
   );
 }
 
-function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activeStatus, availability, rating, watchNow, onRefreshNeeded, onAvailabilityOverride, onPreviewFocus, previewFocused, showNotes, onNoteError }) {
+function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activeStatus, availability, rating, watchNow, alertIconId, onRefreshNeeded, onAvailabilityOverride, onPreviewFocus, previewFocused, showNotes, onNoteError }) {
   const [moving, setMoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [titleMenu, setTitleMenu] = useState(null);
@@ -1487,12 +1546,18 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
               {activeStatus === "CURRENT" ? "Next Episode" : "Watch Now"}
             </a>
           ) : null}
-          <AvailabilityBadge entry={entry} availability={availability} activeStatus={activeStatus} watchNow={watchNow} onEdit={onAvailabilityOverride} />
+          <AvailabilityBadge entry={entry} availability={availability} activeStatus={activeStatus} watchNow={watchNow} alertIconId={alertIconId} onEdit={onAvailabilityOverride} />
         </div>
       </div>
       <div className="meta-pill-stack" aria-label="Anime metadata">
         <span className="meta-pill-slot">
-          {metaIsAiring ? <span className={forcedMetaAiring ? "airing-tag override" : "airing-tag"}>Airing</span> : year ? <span className="year-tag">{year}</span> : null}
+          {metaIsAiring ? (
+            <span className={forcedMetaAiring ? "airing-tag override" : "airing-tag"}>Airing</span>
+          ) : isUnreleased(entry) ? (
+            <span className="unreleased-tag">Unreleased</span>
+          ) : year ? (
+            <span className="year-tag">{year}</span>
+          ) : null}
         </span>
         <span className="meta-pill-slot">
           {mediaFormat ? <span className="format-tag">{mediaFormat}</span> : null}
@@ -1537,13 +1602,27 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
   );
 }
 
-function AddSearchResultRow({ entry, availability, watchNow, onAdded, onPreviewFocus, previewFocused }) {
+function AddSearchResultRow({ entry, availability, watchNow, alertIconId, onAdded, onPreviewFocus, previewFocused }) {
   const [targetStatus, setTargetStatus] = useState("PLANNING");
   const [adding, setAdding] = useState(false);
   const year = entryYear(entry);
   const mediaFormat = formatLabel(entry.format);
   const publicScore = formatPublicScore(entry.publicScore);
   const listedStatus = entry.listStatus || entry.status;
+  const detailsLink = detailsUrl(watchNow, entry);
+  const synonyms = Array.isArray(entry.synonyms)
+    ? entry.synonyms.map((synonym) => String(synonym || "").trim()).filter(Boolean)
+    : [];
+  const romajiTitle = entry.romajiTitle || "";
+  const englishTitle = entry.englishTitle || "";
+  const showRomajiSubtitle = romajiTitle && romajiTitle !== entry.title;
+  const showSynonymSubtitle =
+    !showRomajiSubtitle &&
+    romajiTitle.trim() &&
+    englishTitle.trim() &&
+    romajiTitle.trim() === englishTitle.trim() &&
+    synonyms.length > 0;
+  const subtitle = showRomajiSubtitle ? romajiTitle : showSynonymSubtitle ? synonyms[0] : "";
 
   async function addEntry() {
     setAdding(true);
@@ -1583,18 +1662,35 @@ function AddSearchResultRow({ entry, availability, watchNow, onAdded, onPreviewF
             {entry.title}
           </a>
         </div>
-        <div className="subtitle">{entry.romajiTitle && entry.romajiTitle !== entry.title ? entry.romajiTitle : ""}</div>
+        <div className={showSynonymSubtitle ? "subtitle add-synonym-subtitle" : "subtitle"} tabIndex={showSynonymSubtitle ? 0 : undefined}>
+          {subtitle}
+          {showSynonymSubtitle ? (
+            <span className="synonym-tooltip" role="tooltip">
+              {synonyms.map((synonym, index) => (
+                <span className="synonym-tooltip-item" key={`${synonym}-${index}`}>
+                  {synonym}
+                </span>
+              ))}
+            </span>
+          ) : null}
+        </div>
         {entry.nextAiringEpisode ? <div className="airing">{formatAiring(entry.nextAiringEpisode)}</div> : null}
         <div className="availability-line">
-          <a href={entry.siteUrl} target="_blank" rel="noreferrer" className="watch-now-badge">
+          <a href={detailsLink || entry.siteUrl} target="_blank" rel="noreferrer" className="watch-now-badge">
             Details
           </a>
-          <AvailabilityBadge entry={entry} availability={availability} activeStatus={ADD_STATUS} watchNow={watchNow} />
+          <AvailabilityBadge entry={entry} availability={availability} activeStatus={ADD_STATUS} watchNow={watchNow} alertIconId={alertIconId} />
         </div>
       </div>
       <div className="meta-pill-stack" aria-label="Anime metadata">
         <span className="meta-pill-slot">
-          {entry.isAiring ? <span className="airing-tag">Airing</span> : year ? <span className="year-tag">{year}</span> : null}
+          {entry.isAiring ? (
+            <span className="airing-tag">Airing</span>
+          ) : isUnreleased(entry) ? (
+            <span className="unreleased-tag">Unreleased</span>
+          ) : year ? (
+            <span className="year-tag">{year}</span>
+          ) : null}
         </span>
         <span className="meta-pill-slot">
           {mediaFormat ? <span className="format-tag">{mediaFormat}</span> : null}
@@ -2156,6 +2252,23 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
                 ))}
               </div>
             </div>
+            <div className="settings-section">
+              <h3>Alert Icon</h3>
+              <div className="appearance-options alert-icon-options" role="group" aria-label="Alert icon">
+                {ALERT_ICON_OPTIONS.map((option) => (
+                  <button
+                    type="button"
+                    className={settings.appearance.alertIcon === option.value ? "appearance-option alert-icon-option active" : "appearance-option alert-icon-option"}
+                    disabled={saving}
+                    onClick={() => saveAppearance({ alertIcon: option.value })}
+                    key={option.value}
+                  >
+                    <AvailabilityAlertIcon label={`${option.label} alert icon preview`} iconId={option.value} />
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         )}
 
@@ -2234,6 +2347,8 @@ function App() {
   const [addSearchLoading, setAddSearchLoading] = useState(false);
   const [addSearchError, setAddSearchError] = useState("");
   const [addSearchNotice, setAddSearchNotice] = useState("");
+  const [addSearchLimit, setAddSearchLimit] = useState("100");
+  const [addTitleOnly, setAddTitleOnly] = useState(false);
   const [addDubOnly, setAddDubOnly] = useState(false);
   const [addAvailabilityReady, setAddAvailabilityReady] = useState(false);
   const [availability, setAvailability] = useState({});
@@ -2256,11 +2371,13 @@ function App() {
   const [systemDark, setSystemDark] = useState(() => window.matchMedia?.("(prefers-color-scheme: dark)").matches === true);
   const listRunId = useRef(0);
   const listAbortController = useRef(null);
+  const addSearchRunId = useRef(0);
   const availabilityRunId = useRef(0);
   const availabilityAbortController = useRef(null);
   const ratingRunId = useRef(0);
   const ratingAbortController = useRef(null);
   const completedProgressAbortController = useRef(null);
+  const scrollRestoreRunId = useRef(0);
   const alertsFilterEnabled = settings.watchNow.showUnwatchedDubAlert === true || settings.watchNow.showUnwatchedSubAlert === true;
   const activeUnwatchedAlertOnly = unwatchedAlertOnly && alertsFilterEnabled;
   const isAddTab = activeStatus === ADD_STATUS;
@@ -2338,6 +2455,7 @@ function App() {
     listRunId.current += 1;
     listAbortController.current?.abort();
     listAbortController.current = null;
+    addSearchRunId.current += 1;
     availabilityRunId.current += 1;
     availabilityAbortController.current?.abort();
     availabilityAbortController.current = null;
@@ -2438,12 +2556,10 @@ function App() {
     setAvailabilityLoading(showProgress);
     setAvailabilityProgress({ checked: 0, total: showProgress ? entriesToCheck.length : 0 });
     setAvailabilityWarning("");
-    let consecutiveWarningBatches = 0;
-    let chunkSize = AVAILABILITY_CHUNK_SIZE;
     try {
       let index = 0;
       while (index < entriesToCheck.length) {
-        const chunk = entriesToCheck.slice(index, index + chunkSize);
+        const chunk = entriesToCheck.slice(index, index + AVAILABILITY_CHUNK_SIZE);
         const payload = await api("/api/availability/batch", {
           method: "POST",
           signal: abortController.signal,
@@ -2467,7 +2583,6 @@ function App() {
             }))
           })
         });
-        const batchWarnings = payload.warnings?.length || 0;
         if (availabilityRunId.current !== runId) {
           return false;
         }
@@ -2476,21 +2591,16 @@ function App() {
           ...Object.fromEntries(payload.entries.map((entry) => [entry.mediaId, entry]))
         }));
         if (showProgress) {
+          const completedEntries = Number(payload.checked || 0) + Number(payload.cached || 0);
           setAvailabilityLoading(true);
           setAvailabilityProgress({
-            checked: Math.min(index + chunk.length, entriesToCheck.length),
+            checked: Math.min(index + Math.max(completedEntries, payload.entries?.length || chunk.length), entriesToCheck.length),
             total: entriesToCheck.length
           });
         }
         index += chunk.length;
-        if (batchWarnings > 0) {
-          consecutiveWarningBatches += 1;
-          chunkSize = Math.max(AVAILABILITY_MIN_CHUNK_SIZE, Math.floor(chunkSize / 2));
-          const throttleDelay = Math.min(12000, 1000 * 2 ** Math.min(consecutiveWarningBatches, 4));
-          await sleep(throttleDelay, abortController.signal);
-        } else if (consecutiveWarningBatches > 0) {
-          consecutiveWarningBatches = 0;
-          chunkSize = Math.min(AVAILABILITY_CHUNK_SIZE, chunkSize + AVAILABILITY_MIN_CHUNK_SIZE);
+        if (payload.rateLimited) {
+          setAvailabilityWarning("Availability provider is rate limited. Results may be slower or incomplete.");
         }
       }
       return true;
@@ -2801,6 +2911,15 @@ function updateEntry(updatedEntry, options = {}) {
         return nextEntry;
       })
     );
+    if (Number.isFinite(options.preserveScrollY)) {
+      const restoreRunId = scrollRestoreRunId.current + 1;
+      scrollRestoreRunId.current = restoreRunId;
+      restoreWindowScroll({
+        top: options.preserveScrollY,
+        left: options.preserveScrollX,
+        shouldContinue: () => scrollRestoreRunId.current === restoreRunId
+      });
+    }
   }
 
   function setSelected(mediaId, checked) {
@@ -2830,6 +2949,8 @@ function updateEntry(updatedEntry, options = {}) {
   }
 
   async function searchAddAnime() {
+    const runId = addSearchRunId.current + 1;
+    addSearchRunId.current = runId;
     const normalizedQuery = addQuery.trim();
     setAddSearchError("");
     setAddSearchNotice("");
@@ -2843,16 +2964,95 @@ function updateEntry(updatedEntry, options = {}) {
 
     setAddSearchLoading(true);
     try {
-      const payload = await api(`/api/search/anime?query=${encodeURIComponent(normalizedQuery)}&page=1&perPage=20`);
-      setAddSearchResults(payload.entries || []);
-      if ((payload.entries || []).length === 0) {
+      const numericLimit = addSearchLimit === "all" ? null : Number(addSearchLimit);
+      const results = [];
+      let page = 1;
+
+      while (numericLimit === null || results.length < numericLimit) {
+        const remainingLimit = numericLimit === null ? 50 : numericLimit - results.length;
+        const perPage = addTitleOnly ? 50 : Math.min(50, remainingLimit);
+        const payload = await api(`/api/search/anime?query=${encodeURIComponent(normalizedQuery)}&page=${page}&perPage=${perPage}`);
+        if (addSearchRunId.current !== runId) {
+          return;
+        }
+        const pageEntries = payload.entries || [];
+        if (pageEntries.length === 0) {
+          break;
+        }
+        const visibleEntries = addTitleOnly
+          ? pageEntries.filter((entry) => titleMatchesQuery(entry, normalizedQuery))
+          : pageEntries;
+        results.push(...(numericLimit === null ? visibleEntries : visibleEntries.slice(0, numericLimit - results.length)));
+        if (!payload.pageInfo?.hasNextPage) {
+          break;
+        }
+        page += 1;
+      }
+
+      setAddSearchResults(results);
+      if (results.length === 0) {
         setAddSearchNotice("No AniList results found.");
+      } else {
+        loadCachedAddAvailability(results, runId);
       }
     } catch (searchError) {
+      if (addSearchRunId.current !== runId) {
+        return;
+      }
       setAddSearchResults([]);
       setAddSearchError(searchError.message);
     } finally {
-      setAddSearchLoading(false);
+      if (addSearchRunId.current === runId) {
+        setAddSearchLoading(false);
+      }
+    }
+  }
+
+  async function loadCachedAddAvailability(results, searchRunId) {
+    try {
+      const cachedEntries = [];
+      for (let index = 0; index < results.length; index += AVAILABILITY_CHUNK_SIZE) {
+        if (addSearchRunId.current !== searchRunId) {
+          return;
+        }
+        const chunk = results.slice(index, index + AVAILABILITY_CHUNK_SIZE);
+        const payload = await api("/api/availability/batch", {
+          method: "POST",
+          body: JSON.stringify({
+            cacheOnly: true,
+            entries: chunk.map((entry) => ({
+              mediaId: entry.mediaId,
+              malId: entry.malId,
+              status: entry.status,
+              title: entry.title,
+              romajiTitle: entry.romajiTitle,
+              englishTitle: entry.englishTitle,
+              nativeTitle: entry.nativeTitle,
+              synonyms: entry.synonyms || [],
+              endDate: entry.endDate,
+              format: entry.format,
+              mediaStatus: entry.mediaStatus,
+              totalEpisodes: entry.totalEpisodes
+            }))
+          })
+        });
+        if (addSearchRunId.current !== searchRunId) {
+          return;
+        }
+        cachedEntries.push(...(payload.entries || []));
+      }
+      if (cachedEntries.length === 0 || addSearchRunId.current !== searchRunId) {
+        return;
+      }
+      setAvailability((currentAvailability) => ({
+        ...currentAvailability,
+        ...Object.fromEntries(cachedEntries.map((entry) => [entry.mediaId, entry]))
+      }));
+      setAddAvailabilityReady(true);
+    } catch (cacheError) {
+      if (addSearchRunId.current === searchRunId) {
+        console.warn("Cached Add availability lookup failed.", cacheError);
+      }
     }
   }
 
@@ -3217,8 +3417,8 @@ function updateEntry(updatedEntry, options = {}) {
           </div>
         </div>
 
-        <section className="toolbar">
-          <div className="search-stack">
+        <section className={isAddTab ? "toolbar add-toolbar" : "toolbar"}>
+          <div className={isAddTab ? "search-stack add-search-stack" : "search-stack"}>
             {isAddTab ? (
               <div className="search-box add-search-box">
                 <span>Search</span>
@@ -3235,6 +3435,16 @@ function updateEntry(updatedEntry, options = {}) {
                 <button type="button" disabled={addSearchLoading} onClick={searchAddAnime}>
                   {addSearchLoading ? "Searching..." : "Search"}
                 </button>
+                <label className="add-search-option add-limit-box">
+                  <span>Limit</span>
+                  <select value={addSearchLimit} disabled={addSearchLoading} onChange={(event) => setAddSearchLimit(event.target.value)}>
+                    {ADD_SEARCH_LIMIT_OPTIONS.map((limit) => (
+                      <option value={limit} key={limit}>
+                        {limit === "all" ? "All" : limit}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
             ) : (
               <label className="search-box">
@@ -3255,6 +3465,15 @@ function updateEntry(updatedEntry, options = {}) {
           </div>
           {isAddTab ? (
             <div className="filter-strip" aria-label="Add filters">
+              <label className="filter-chip">
+                <input
+                  type="checkbox"
+                  checked={addTitleOnly}
+                  disabled={addSearchLoading}
+                  onChange={(event) => setAddTitleOnly(event.target.checked)}
+                />
+                Title only
+              </label>
               <label
                 className={addAvailabilityReady ? "filter-chip" : "filter-chip disabled"}
                 title={addAvailabilityReady ? "" : "Run Recheck Episodes before filtering by dub availability."}
@@ -3377,6 +3596,7 @@ function updateEntry(updatedEntry, options = {}) {
                     entry={entry}
                     availability={availability[entry.mediaId]}
                     watchNow={settings.watchNow}
+                    alertIconId={settings.appearance.alertIcon}
                     onAdded={updateAddSearchResult}
                     onPreviewFocus={openFocusedPreview}
                     previewFocused={Boolean(focusedPreviewEntry)}
@@ -3401,6 +3621,7 @@ function updateEntry(updatedEntry, options = {}) {
                 availability={availability[entry.mediaId]}
                 rating={ratings[entry.mediaId]}
                 watchNow={settings.watchNow}
+                alertIconId={settings.appearance.alertIcon}
                 showNotes={showNotes}
                 onNoteError={setError}
                 onPreviewFocus={openFocusedPreview}
