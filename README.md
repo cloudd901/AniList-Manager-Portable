@@ -6,6 +6,30 @@ AniList Manager Portable is a local Windows app for reading and managing an AniL
 
 The release is portable. Unzip it, run `AniListManagerPortable.exe`, and keep the executable with its `data` folder if you move it to another location.
 
+## Screenshots
+
+### List Management
+
+![AniList Manager list view with list controls](docs/screenshots/00-main-list-view-lists-mode.png)
+
+### Notes And Availability
+
+![AniList Manager notes view with availability badges](docs/screenshots/01-main-list-overview.png)
+
+### Add Anime Search
+
+![AniList Manager add anime search for dragon titles](docs/screenshots/05-add-search-dragon-title-only.png)
+
+### Settings
+
+![AniList Manager appearance settings](docs/screenshots/02-settings-appearance.png)
+
+![AniList Manager Watch Now settings](docs/screenshots/04-watch-now-settings.png)
+
+### About
+
+![AniList Manager about dialog with version](docs/screenshots/03-about-version.png)
+
 ## First Run
 
 1. Run `AniListManagerPortable.exe`.

@@ -25,6 +25,7 @@ data/
 .runtime/
 *.zip
 *.7z
+output/
 
 # Local secrets and environment overrides
 .env
