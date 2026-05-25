@@ -8,4 +8,4 @@
 
 ## Upgrades
 
-- Implement auto-update feature.
+- Implement update check or auto-update feature.

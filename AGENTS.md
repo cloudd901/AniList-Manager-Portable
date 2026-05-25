@@ -10,7 +10,7 @@
 
 ## Project Overview
 
-AniList Manager Portable is a Windows x64 Native AOT rewrite of AniList Manager. One native executable hosts a local HTTP API, serves the built React UI, and provides a system tray menu.
+AniList Manager Portable is a Windows x64 Native AOT application. One native executable hosts a local HTTP API, serves the built React UI, and provides a system tray menu.
 
 Goals:
 
