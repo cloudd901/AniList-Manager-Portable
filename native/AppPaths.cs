@@ -13,8 +13,15 @@ internal sealed class AppPaths
         AvailabilityOverridesPath = Path.Combine(DataDir, "availability-overrides.json");
         MalCachePath = Path.Combine(DataDir, "mal-cache.json");
         WatchNowServersPath = Path.Combine(DataDir, "watch-now-servers.json");
+        OfflineDir = Path.Combine(DataDir, "offline");
+        OfflineStatePath = Path.Combine(OfflineDir, "state.json");
+        OfflinePackagePath = Path.Combine(OfflineDir, "package.json");
+        OfflineQueuePath = Path.Combine(OfflineDir, "queue.json");
+        OfflineImagesDir = Path.Combine(OfflineDir, "images");
         RuntimeDir = Path.Combine(Root, ".runtime");
         Directory.CreateDirectory(DataDir);
+        Directory.CreateDirectory(OfflineDir);
+        Directory.CreateDirectory(OfflineImagesDir);
         Directory.CreateDirectory(RuntimeDir);
     }
 
@@ -25,6 +32,11 @@ internal sealed class AppPaths
     public string AvailabilityOverridesPath { get; }
     public string MalCachePath { get; }
     public string WatchNowServersPath { get; }
+    public string OfflineDir { get; }
+    public string OfflineStatePath { get; }
+    public string OfflinePackagePath { get; }
+    public string OfflineQueuePath { get; }
+    public string OfflineImagesDir { get; }
     public string RuntimeDir { get; }
 
     public string ConfigLabel => "data\\config.json";

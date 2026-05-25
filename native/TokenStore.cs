@@ -106,6 +106,11 @@ internal sealed class TokenStore(AppPaths paths)
                     AlertIcons,
                     "Appearance alert icon must be triangle, beacon, bolt, dot, or green-dot.");
             }
+            if (appearanceInput.ContainsKey("showSynonymInfoIcon"))
+            {
+                currentAppearance["showSynonymInfoIcon"] = JsonUtil.Bool(appearanceInput, "showSynonymInfoIcon")
+                    ?? throw new ApiException("Show Synonym Info Icon must be true or false.", 400);
+            }
             config["appearance"] = currentAppearance;
         }
         config["updatedAt"] = DateTimeOffset.UtcNow.ToString("O");
@@ -115,9 +120,10 @@ internal sealed class TokenStore(AppPaths paths)
 
     private static JsonObject PublicAppearance(JsonObject? appearance) => new()
     {
-        ["colorMode"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "colorMode"), ColorModes, "light"),
-        ["accentTheme"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "accentTheme"), AccentThemes, "blue"),
-        ["alertIcon"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "alertIcon"), AlertIcons, "green-dot")
+        ["colorMode"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "colorMode"), ColorModes, "soft"),
+        ["accentTheme"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "accentTheme"), AccentThemes, "teal"),
+        ["alertIcon"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "alertIcon"), AlertIcons, "green-dot"),
+        ["showSynonymInfoIcon"] = JsonUtil.Bool(appearance ?? new JsonObject(), "showSynonymInfoIcon") ?? true
     };
 
     private static string NormalizedAppearanceValue(string? value, HashSet<string> allowedValues, string fallback)

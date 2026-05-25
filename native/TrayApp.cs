@@ -196,7 +196,11 @@ internal sealed class TrayApp : IDisposable
             return;
         }
 
-        var nextIcon = CreateStatusIcon(StateColor(state));
+        var nextIcon = CreateAppIcon();
+        if (nextIcon == IntPtr.Zero)
+        {
+            nextIcon = CreateStatusIcon(StateColor(state));
+        }
         var oldIcon = currentIcon;
         currentIcon = nextIcon;
         ShellNotifyIcon(action, BuildNotifyData(currentIcon));
@@ -252,7 +256,20 @@ internal sealed class TrayApp : IDisposable
         return CreateIcon(IntPtr.Zero, width, height, 1, 32, and, xor);
     }
 
-    private static void OpenApp()
+    private static IntPtr CreateAppIcon()
+    {
+        var processPath = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(processPath))
+        {
+            return IntPtr.Zero;
+        }
+
+        var smallIcons = new IntPtr[1];
+        var extracted = ExtractIconEx(processPath, 0, null, smallIcons, 1);
+        return extracted > 0 ? smallIcons[0] : IntPtr.Zero;
+    }
+
+    public static void OpenApp()
     {
         Process.Start(new ProcessStartInfo
         {
@@ -393,6 +410,9 @@ internal sealed class TrayApp : IDisposable
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     private static extern bool Shell_NotifyIcon(uint dwMessage, ref NotifyIconData lpData);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint ExtractIconEx(string szFileName, int nIconIndex, IntPtr[]? phiconLarge, IntPtr[]? phiconSmall, uint nIcons);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr GetModuleHandle(string? lpModuleName);

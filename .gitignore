@@ -1,22 +1,38 @@
 # Node / Vite
 web/node_modules/
 web/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # .NET build output
+bin/
+obj/
 native/bin/
 native/obj/
 native/Generated/WebAssets.g.cs
+publish/
+artifacts/
+TestResults/
+coverage/
+*.nupkg
+*.snupkg
 
 # Portable release/test output and runtime data
 release/
 data/
 .runtime/
+*.zip
+*.7z
 
 # Local secrets and environment overrides
 .env
 .env.*
+*.local
 *.user
 *.suo
+secrets.json
 
 # Logs and transient files
 *.log
@@ -28,3 +44,4 @@ data/
 Thumbs.db
 .vs/
 .vscode/
+*.swp

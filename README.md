@@ -22,6 +22,7 @@ The app stores user data beside the executable. Do not share the `data` folder i
 - Update watched progress, AniList score, and list status.
 - Remove list entries individually or in bulk.
 - Use bulk progress, status, delete, and local note actions for selected rows.
+- Package lists and cover images for Offline Mode, queue list edits while offline, and sync or discard queued edits when returning online.
 - View availability badges with total, subbed, and dubbed episode counts when lookup data is available.
 - Refresh availability for all rows, missing rows, or currently airing rows.
 - Right-click an availability badge to save local availability overrides.
@@ -70,6 +71,7 @@ Portable data is stored beside the executable:
 - `data\mal-cache.json`: cached MAL/Jikan metadata, totals, and rating labels.
 - `data\notes.json`: local per-anime notes.
 - `data\watch-now-servers.json`: Watch Now server selection, link toggles, and server URL templates.
+- `data\offline\`: packaged Offline Mode lists, cover images, state, and queued edits.
 
 Availability overrides and notes are local to this portable folder. They are not synced to AniList.
 
@@ -81,17 +83,17 @@ MAL content rating pills such as `PG-13`, `R`, and `R+` are loaded separately fr
 
 ## Watch Now Settings
 
-`Settings > Watch Now` manages the server list used by the `Details` and `Next Episode` links. Fresh data starts with these removable built-in servers:
-
-- 1Anime
-- Animegers
-- Miruro
-- HeAnime
-- AnimeOBT
+`Settings > Watch Now` manages the server list used by the `Details` and `Next Episode` links.
 
 Each server stores separate URL templates. Details templates must contain `<anilistid>` or `<malid>`. Watch templates must contain either ID placeholder and `<episode>`. Links that require `<malid>` fall back or stay hidden when the AniList entry has no MAL ID.
 
 Use `Force use AniList for Details links` to send Details directly to AniList. Details also fall back to AniList when there is no active Watch Now server. `Hide Watch Now episode links` hides the `Next Episode` action without hiding Details.
+
+## Offline Mode
+
+Use `Offline Mode` from the main toolbar to package your AniList lists, local metadata, and cover images into `data\offline`. While Offline Mode is active, the app reads from the packaged data and disables network-only actions such as AniList search, token changes, external details links, availability rechecks, and Watch Now links.
+
+Progress, score, status, note, and remove actions made while offline are queued locally. When you turn Offline Mode off, the app can sync queued AniList edits or discard them. You can also choose whether to keep or remove the packaged offline data after disabling Offline Mode.
 
 ## Appearance Settings
 
@@ -120,15 +122,7 @@ The app opens these AniList web pages from Settings:
 | `https://anilist.co/settings/developer` | AniList API client setup. |
 | `https://anilist.co/api/v2/oauth/authorize?...` | AniList token authorization helper. |
 
-The active Watch Now server is opened by your browser when it supplies the selected `Details` or `Next Episode` URL. Built-in destinations are:
-
-| Site | Built-in use |
-| --- | --- |
-| `https://1anime.app` | Details and next-episode links. |
-| `https://animegers.com` | Details and next-episode links. |
-| `https://www.miruro.tv` | Details and next-episode links. |
-| `https://heanime.com` | Details and next-episode links. |
-| `https://animeobt.com` | Details and next-episode links. |
+The active Watch Now server is opened by your browser when it supplies the selected `Details` or `Next Episode` URL.
 
 ## Notes
 

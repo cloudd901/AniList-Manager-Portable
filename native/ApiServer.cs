@@ -1,12 +1,15 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 
 namespace AniListManagerPortable;
 
-internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniListClient aniList, AvailabilityService availability, AppPaths paths)
+internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniListClient aniList, AvailabilityService availability, OfflineService offline, AppPaths paths)
 {
+    private const string SessionHeaderName = "X-AniList-Manager-Session";
     private static readonly HashSet<string> ListStatuses = ["CURRENT", "PLANNING", "COMPLETED", "PAUSED", "DROPPED", "REPEATING"];
+    private readonly string sessionToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
     private HttpListener? listener;
     private CancellationTokenSource? cts;
     private Task? loopTask;
@@ -117,9 +120,76 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
     private async Task HandleApiAsync(HttpListenerContext context, string path, CancellationToken cancellationToken)
     {
         var method = context.Request.HttpMethod.ToUpperInvariant();
+        ValidateApiRequest(context, method, path);
+        if (method == "GET" && path == "/api/session")
+        {
+            await SendJsonAsync(context, 200, new JsonObject
+            {
+                ["headerName"] = SessionHeaderName,
+                ["sessionToken"] = sessionToken
+            }.ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
         if (method == "GET" && path == "/api/health")
         {
-            await SendJsonAsync(context, 200, tokens.HealthJson().ToJsonString(JsonUtil.WriterOptions));
+            var health = tokens.HealthJson();
+            health["offline"] = offline.Status();
+            await SendJsonAsync(context, 200, health.ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "GET" && path == "/api/offline")
+        {
+            await SendJsonAsync(context, 200, offline.Status().ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "GET" && path == "/api/offline/queue")
+        {
+            await SendJsonAsync(context, 200, offline.QueueSummary().ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "POST" && path == "/api/offline/enable")
+        {
+            if (offline.IsEnabled)
+            {
+                throw new ApiException("Offline Mode is already enabled.", 409);
+            }
+            await SendJsonAsync(context, 200, offline.BeginEnable().ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "GET" && path.StartsWith("/api/offline/enable/", StringComparison.OrdinalIgnoreCase))
+        {
+            var jobId = ParseTrailingText(path, "/api/offline/enable/");
+            await SendJsonAsync(context, 200, offline.GetEnableJob(jobId).ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "POST" && path == "/api/offline/sync")
+        {
+            await SendJsonAsync(context, 200, (await offline.SyncQueuedAsync(cancellationToken)).ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "POST" && path == "/api/offline/discard-failed")
+        {
+            await SendJsonAsync(context, 200, offline.DiscardQueued().ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "POST" && path == "/api/offline/disable")
+        {
+            var input = JsonNode.Parse(await ReadBodyAsync(context)) as JsonObject ?? new JsonObject();
+            var syncQueued = JsonUtil.Bool(input, "syncQueued") == true;
+            var discardQueued = JsonUtil.Bool(input, "discardQueued") == true;
+            var removeData = JsonUtil.Bool(input, "removeData") == true;
+            await SendJsonAsync(context, 200, (await offline.DisableAsync(syncQueued, discardQueued, removeData, cancellationToken)).ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "GET" && path.StartsWith("/api/offline/images/", StringComparison.OrdinalIgnoreCase))
+        {
+            var fileName = ParseTrailingText(path, "/api/offline/images/");
+            var image = offline.ReadImage(fileName);
+            context.Response.StatusCode = 200;
+            context.Response.ContentType = image.ContentType;
+            context.Response.ContentLength64 = image.Bytes.Length;
+            await context.Response.OutputStream.WriteAsync(image.Bytes, cancellationToken);
+            context.Response.Close();
             return;
         }
         if (method == "GET" && path == "/api/readme")
@@ -183,6 +253,7 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         }
         if (method == "POST" && path == "/api/auth/token")
         {
+            EnsureOnline("Token changes are disabled while Offline Mode is active.");
             var body = await ReadBodyAsync(context);
             var token = JsonUtil.String(JsonNode.Parse(body), "token");
             if (string.IsNullOrWhiteSpace(token) || token.Trim().Length < 20)
@@ -201,6 +272,7 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         }
         if (method == "POST" && path == "/api/auth/import-cli")
         {
+            EnsureOnline("Token import is disabled while Offline Mode is active.");
             var cliToken = tokens.ReadCliToken();
             if (string.IsNullOrWhiteSpace(cliToken))
             {
@@ -232,11 +304,17 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         }
         if (method == "GET" && path == "/api/me")
         {
+            if (offline.IsEnabled)
+            {
+                await SendJsonAsync(context, 200, (offline.Status()["user"]?.DeepClone() ?? new JsonObject()).ToJsonString(JsonUtil.WriterOptions));
+                return;
+            }
             await SendJsonAsync(context, 200, (await aniList.ViewerAsync(cancellationToken: cancellationToken)).ToJsonString(JsonUtil.WriterOptions));
             return;
         }
         if (method == "GET" && path == "/api/search/anime")
         {
+            EnsureOnline("AniList search is disabled while Offline Mode is active.");
             var query = ParseQuery(context.Request.Url?.Query ?? "");
             var search = query.TryGetValue("query", out var queryValue) ? queryValue.Trim() : "";
             if (string.IsNullOrWhiteSpace(search))
@@ -264,6 +342,11 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             {
                 throw new ApiException("Only ANIME lists are supported.", 400);
             }
+            if (offline.IsEnabled)
+            {
+                await SendJsonAsync(context, 200, offline.GetList(status, type).ToJsonString(JsonUtil.WriterOptions));
+                return;
+            }
             var result = await aniList.GetListEntriesAsync(status, type, cancellationToken);
             await SendJsonAsync(context, 200, new JsonObject
             {
@@ -281,6 +364,12 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             var status = NormalizeStatus(query.TryGetValue("status", out var statusValue) ? statusValue : "CURRENT");
             var type = (query.TryGetValue("type", out var typeValue) ? typeValue : "ANIME").ToUpperInvariant();
             var refresh = query.TryGetValue("refresh", out var refreshValue) && refreshValue.Equals("true", StringComparison.OrdinalIgnoreCase);
+            if (offline.IsEnabled)
+            {
+                var offlineList = offline.GetList(status, type);
+                await SendJsonAsync(context, 200, offline.GetAvailability(offlineList["entries"] as JsonArray ?? new JsonArray()).ToJsonString(JsonUtil.WriterOptions));
+                return;
+            }
             var list = await aniList.GetListEntriesAsync(status, type, cancellationToken);
             var cacheOnly = query.TryGetValue("cacheOnly", out var cacheOnlyValue) && cacheOnlyValue.Equals("true", StringComparison.OrdinalIgnoreCase);
             await SendAvailabilityAsync(context, list.Entries, refresh, false, cacheOnly, false, status, type, cancellationToken);
@@ -295,6 +384,11 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         {
             var input = JsonNode.Parse(await ReadBodyAsync(context)) as JsonObject ?? new JsonObject();
             var entries = input["entries"] as JsonArray ?? throw new ApiException("Provide entries.", 400);
+            if (offline.IsEnabled)
+            {
+                await SendJsonAsync(context, 200, offline.GetAvailability(entries).ToJsonString(JsonUtil.WriterOptions));
+                return;
+            }
             var refresh = JsonUtil.Bool(input, "refresh") == true;
             var force = JsonUtil.Bool(input, "force") == true;
             var cacheOnly = JsonUtil.Bool(input, "cacheOnly") == true;
@@ -306,6 +400,11 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         {
             var input = JsonNode.Parse(await ReadBodyAsync(context)) as JsonObject ?? new JsonObject();
             var entries = input["entries"] as JsonArray ?? throw new ApiException("Provide entries.", 400);
+            if (offline.IsEnabled)
+            {
+                await SendJsonAsync(context, 200, offline.GetRatings(entries).ToJsonString(JsonUtil.WriterOptions));
+                return;
+            }
             var cacheOnly = JsonUtil.Bool(input, "cacheOnly") == true;
             await SendJsonAsync(context, 200, (await availability.ResolveRatingsAsync(entries, cancellationToken, cacheOnly)).ToJsonString(JsonUtil.WriterOptions));
             return;
@@ -334,13 +433,20 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             var score = ReadOptionalDouble(input, "score");
             var notesProvided = input.ContainsKey("notes");
             var notes = JsonUtil.String(input, "notes");
-            if (progress is null && string.IsNullOrWhiteSpace(status) && score is null && !notesProvided)
+            var progressProvided = input.ContainsKey("progress");
+            var scoreProvided = input.ContainsKey("score");
+            if (!progressProvided && string.IsNullOrWhiteSpace(status) && !scoreProvided && !notesProvided)
             {
                 throw new ApiException("Provide progress, status, score, notes, or a combination.", 400);
             }
             if (status is not null)
             {
                 status = NormalizeStatus(status);
+            }
+            if (offline.IsEnabled)
+            {
+                await SendJsonAsync(context, 200, offline.QueueSaveEntry(mediaId, progress, progressProvided, status, score, scoreProvided, notes, notesProvided).ToJsonString(JsonUtil.WriterOptions));
+                return;
             }
             var entry = await aniList.SaveEntryAsync(mediaId, progress, status, score, notes, notesProvided, cancellationToken);
             await SendJsonAsync(context, 200, new JsonObject { ["entry"] = entry }.ToJsonString(JsonUtil.WriterOptions));
@@ -349,6 +455,11 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         if (method == "DELETE" && path.StartsWith("/api/list-entries/", StringComparison.OrdinalIgnoreCase))
         {
             var entryId = ParseTrailingInt(path, "/api/list-entries/");
+            if (offline.IsEnabled)
+            {
+                await SendJsonAsync(context, 200, offline.QueueDeleteEntry(entryId).ToJsonString(JsonUtil.WriterOptions));
+                return;
+            }
             await aniList.DeleteEntryAsync(entryId, cancellationToken);
             await SendJsonAsync(context, 200, new JsonObject { ["deleted"] = true, ["entryId"] = entryId }.ToJsonString(JsonUtil.WriterOptions));
             return;
@@ -358,6 +469,11 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             var input = JsonNode.Parse(await ReadBodyAsync(context)) as JsonObject ?? new JsonObject();
             var status = NormalizeStatus(JsonUtil.String(input, "status") ?? "");
             var ids = input["mediaIds"] as JsonArray ?? throw new ApiException("Provide mediaIds.", 400);
+            if (offline.IsEnabled)
+            {
+                await SendJsonAsync(context, 200, offline.QueueBulkStatus(ids, status).ToJsonString(JsonUtil.WriterOptions));
+                return;
+            }
             var entries = new JsonArray();
             foreach (var id in ids.Select(id => id?.GetValue<int>() ?? 0).Where(id => id > 0))
             {
@@ -370,6 +486,11 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         {
             var input = JsonNode.Parse(await ReadBodyAsync(context)) as JsonObject ?? new JsonObject();
             var updates = input["updates"] as JsonArray ?? throw new ApiException("Provide updates.", 400);
+            if (offline.IsEnabled)
+            {
+                await SendJsonAsync(context, 200, offline.QueueBulkProgress(updates).ToJsonString(JsonUtil.WriterOptions));
+                return;
+            }
             var requestedUpdates = updates
                 .OfType<JsonObject>()
                 .Select(update => (MediaId: JsonUtil.Int(update, "mediaId") ?? 0, Progress: JsonUtil.Int(update, "progress") ?? 0))
@@ -383,6 +504,17 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         {
             var input = JsonNode.Parse(await ReadBodyAsync(context)) as JsonObject ?? new JsonObject();
             var ids = input["entryIds"] as JsonArray ?? throw new ApiException("Provide entryIds.", 400);
+            if (offline.IsEnabled)
+            {
+                var offlineDeleted = new JsonArray();
+                foreach (var id in ids.Select(id => id?.GetValue<int>() ?? 0).Where(id => id > 0))
+                {
+                    offline.QueueDeleteEntry(id);
+                    offlineDeleted.Add((JsonNode?)id);
+                }
+                await SendJsonAsync(context, 200, new JsonObject { ["deleted"] = offlineDeleted.Count, ["entryIds"] = offlineDeleted, ["offline"] = true, ["queued"] = offline.Status()["queued"]?.DeepClone() }.ToJsonString(JsonUtil.WriterOptions));
+                return;
+            }
             var deleted = new JsonArray();
             foreach (var id in ids.Select(id => id?.GetValue<int>() ?? 0).Where(id => id > 0))
             {
@@ -396,9 +528,57 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         throw new ApiException("Not found.", 404);
     }
 
+    private void ValidateApiRequest(HttpListenerContext context, string method, string path)
+    {
+        var origin = context.Request.Headers["Origin"];
+        if (!string.IsNullOrWhiteSpace(origin) && !IsAllowedLocalOrigin(origin))
+        {
+            throw new ApiException("Cross-origin API requests are not allowed.", 403);
+        }
+
+        var fetchSite = context.Request.Headers["Sec-Fetch-Site"];
+        if (string.Equals(fetchSite, "cross-site", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ApiException("Cross-site API requests are not allowed.", 403);
+        }
+
+        if (path == "/api/session" || !RequiresSessionHeader(method))
+        {
+            return;
+        }
+
+        var providedToken = context.Request.Headers[SessionHeaderName];
+        if (!CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(providedToken ?? ""),
+            Encoding.UTF8.GetBytes(sessionToken)))
+        {
+            throw new ApiException("Invalid or missing local session header.", 403);
+        }
+    }
+
+    private static bool RequiresSessionHeader(string method) =>
+        method is "POST" or "PUT" or "PATCH" or "DELETE";
+
+    private static bool IsAllowedLocalOrigin(string origin)
+    {
+        if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        return uri.Scheme == Uri.UriSchemeHttp
+            && uri.Port == 6767
+            && (string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uri.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase));
+    }
+
     private async Task<JsonObject> GetAuthStateAsync(CancellationToken cancellationToken)
     {
         var tokenState = tokens.Resolve();
+        if (offline.IsEnabled)
+        {
+            return offline.OfflineAuthState(tokenState);
+        }
         var state = new JsonObject
         {
             ["tokenPresent"] = tokenState.Token is not null,
@@ -431,7 +611,16 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
     {
         var settings = tokens.ReadPublicSettings();
         settings["watchNow"] = watchNow.ReadPublicSettings();
+        settings["offline"] = offline.Status();
         return settings;
+    }
+
+    private void EnsureOnline(string message)
+    {
+        if (offline.IsEnabled)
+        {
+            throw new ApiException(message, 409);
+        }
     }
 
     private async Task SendAvailabilityAsync(HttpListenerContext context, JsonArray entries, bool refresh, bool force, bool cacheOnly, bool usableCacheOnly, string? status, string? type, CancellationToken cancellationToken)

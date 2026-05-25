@@ -95,9 +95,10 @@ function defaultSettings() {
   return {
     showNotes: false,
     appearance: {
-      colorMode: "light",
-      accentTheme: "blue",
-      alertIcon: "green-dot"
+      colorMode: "soft",
+      accentTheme: "teal",
+      alertIcon: "green-dot",
+      showSynonymInfoIcon: true
     },
     watchNow: {
       selectedServerId: "",
@@ -116,9 +117,10 @@ function normalizeSettings(settings) {
   return {
     showNotes: settings?.showNotes === true,
     appearance: {
-      colorMode: COLOR_MODES.some((mode) => mode.value === appearance.colorMode) ? appearance.colorMode : "light",
-      accentTheme: ACCENT_THEMES.some((theme) => theme.value === appearance.accentTheme) ? appearance.accentTheme : "blue",
-      alertIcon: ALERT_ICON_OPTIONS.some((option) => option.value === appearance.alertIcon) ? appearance.alertIcon : "green-dot"
+      colorMode: COLOR_MODES.some((mode) => mode.value === appearance.colorMode) ? appearance.colorMode : "soft",
+      accentTheme: ACCENT_THEMES.some((theme) => theme.value === appearance.accentTheme) ? appearance.accentTheme : "teal",
+      alertIcon: ALERT_ICON_OPTIONS.some((option) => option.value === appearance.alertIcon) ? appearance.alertIcon : "green-dot",
+      showSynonymInfoIcon: appearance.showSynonymInfoIcon !== false
     },
     watchNow: {
       selectedServerId: watchNow.selectedServerId || "",
@@ -429,6 +431,22 @@ function statusLabel(value) {
   return LIST_STATUSES.find((status) => status.value === value)?.label || value || "";
 }
 
+function formatQueueTimestamp(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  });
+}
+
 function sanitizePreviewSynopsis(value) {
   if (!value || typeof document === "undefined") {
     return "";
@@ -556,15 +574,39 @@ function parseMarkdown(md) {
     currentBlock = null;
   }
 
-  function inline(text) {
-    let output = text
+  function escapeHtml(text) {
+    return String(text)
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
+  }
 
+  function escapeAttribute(text) {
+    return escapeHtml(text)
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function safeMarkdownUrl(url) {
+    try {
+      const parsedUrl = new URL(url, window.location.origin);
+      if (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:") {
+        return parsedUrl.href;
+      }
+    } catch {
+      // Ignore malformed or unsupported URLs.
+    }
+    return "";
+  }
+
+  function inline(text) {
+    let output = escapeHtml(text);
     output = output.replace(/`([^`]+)`/g, "<code>$1</code>");
     output = output.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    output = output.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+    output = output.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, url) => {
+      const safeUrl = safeMarkdownUrl(url);
+      return safeUrl ? `<a href="${escapeAttribute(safeUrl)}" target="_blank" rel="noreferrer">${label}</a>` : label;
+    });
 
     return output;
   }
@@ -638,16 +680,51 @@ function parseMarkdown(md) {
   return html.join('\n');
 }
 
-async function api(path, options = {}) {
+let apiSessionPromise = null;
+
+function requiresApiSession(path, method) {
+  return path.startsWith("/api/") && path !== "/api/session" && ["POST", "PUT", "PATCH", "DELETE"].includes(method);
+}
+
+async function apiSession() {
+  if (!apiSessionPromise) {
+    apiSessionPromise = fetch("/api/session", {
+      headers: {
+        Accept: "application/json"
+      }
+    }).then(async (response) => {
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.sessionToken || !payload.headerName) {
+        throw new Error(payload.error || "Could not create a local API session.");
+      }
+      return payload;
+    });
+  }
+  return apiSessionPromise;
+}
+
+async function api(path, options = {}, retrySession = true) {
+  const method = (options.method || "GET").toUpperCase();
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {})
+  };
+  if (requiresApiSession(path, method)) {
+    const session = await apiSession();
+    headers[session.headerName] = session.sessionToken;
+  }
+
   const response = await fetch(path, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {})
-    }
+    method,
+    headers
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (retrySession && response.status === 403 && /session/i.test(payload.error || "")) {
+      apiSessionPromise = null;
+      return api(path, options, false);
+    }
     throw new Error(payload.error || `Request failed: ${response.status}`);
   }
   return payload;
@@ -714,7 +791,7 @@ function restoreWindowScroll({ top, left, shouldContinue }) {
   }, 150);
 }
 
-function ProgressControl({ entry, onUpdate, onRefreshNeeded, shouldRefreshAtTotal }) {
+function ProgressControl({ entry, onUpdate, onRefreshNeeded, shouldRefreshAtTotal, offlineMode }) {
   const total = entry.totalEpisodes;
   const [value, setValue] = useState(String(entry.progress));
   const [saving, setSaving] = useState(false);
@@ -734,7 +811,7 @@ function ProgressControl({ entry, onUpdate, onRefreshNeeded, shouldRefreshAtTota
         body: JSON.stringify({ progress: normalized })
       });
       onUpdate(payload.entry);
-      if (shouldRefreshAtTotal && Number.isFinite(total) && total > 0 && normalized >= total) {
+      if (!offlineMode && shouldRefreshAtTotal && Number.isFinite(total) && total > 0 && normalized >= total) {
         await onRefreshNeeded();
       }
     } catch (saveError) {
@@ -884,6 +961,19 @@ function isAvailabilityIncomplete(availability) {
   );
 }
 
+function isAvailabilityComplete(availability) {
+  if (!availability || availability.status !== "found" || !availability.totalEpisodes) {
+    return false;
+  }
+  if (availability.forceComplete) {
+    return true;
+  }
+  const totalEpisodes = Number(availability.totalEpisodes);
+  const subEpisodes = Number(availability.subEpisodes);
+  const dubEpisodes = Number(availability.dubEpisodes);
+  return subEpisodes >= totalEpisodes && (dubEpisodes <= 0 || dubEpisodes >= totalEpisodes);
+}
+
 function isAvailabilityMissing(availability) {
   return (
     !availability ||
@@ -915,6 +1005,10 @@ function selectedWatchNowServer(watchNow) {
   return watchNow?.servers?.find((server) => server.id === watchNow.selectedServerId) || null;
 }
 
+function sortedWatchNowServers(watchNow) {
+  return [...(watchNow?.servers || [])].sort((a, b) => (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" }));
+}
+
 function templateHasMediaId(template) {
   const normalizedTemplate = template?.toLowerCase() || "";
   return normalizedTemplate.includes("<anilistid>") || normalizedTemplate.includes("<malid>");
@@ -943,7 +1037,21 @@ function detailsUrl(watchNow, entry) {
   if (watchNow?.useAniListDetails || !server?.detailsUrlTemplate) {
     return entry.siteUrl || "";
   }
-  return urlFromTemplate(server.detailsUrlTemplate, entry) || entry.siteUrl || "";
+  return detailsUrlForServer(server, entry) || entry.siteUrl || "";
+}
+
+function detailsUrlForServer(server, entry) {
+  return urlFromTemplate(server?.detailsUrlTemplate || "", entry);
+}
+
+function nextEpisodeNumber(entry) {
+  const total = Number(entry.totalEpisodes);
+  const nextEpisode = Math.max(1, Number(entry.progress || 0) + 1);
+  return Number.isFinite(total) && total > 0 ? Math.min(nextEpisode, total) : nextEpisode;
+}
+
+function watchUrlForServer(server, entry, episode) {
+  return urlFromTemplate(server?.watchUrlTemplate || "", entry, episode);
 }
 
 function nextEpisodeUrl(watchNow, entry) {
@@ -956,10 +1064,7 @@ function nextEpisodeUrl(watchNow, entry) {
     return "";
   }
 
-  const total = Number(entry.totalEpisodes);
-  const nextEpisode = Math.max(1, Number(entry.progress || 0) + 1);
-  const clampedEpisode = Number.isFinite(total) && total > 0 ? Math.min(nextEpisode, total) : nextEpisode;
-  return urlFromTemplate(server.watchUrlTemplate, entry, clampedEpisode);
+  return watchUrlForServer(server, entry, nextEpisodeNumber(entry));
 }
 
 function watchNowUrl(watchNow, entry) {
@@ -972,7 +1077,70 @@ function watchNowUrl(watchNow, entry) {
     return "";
   }
 
-  return urlFromTemplate(server.watchUrlTemplate, entry, 1);
+  return watchUrlForServer(server, entry, 1);
+}
+
+function linkMenuPosition(event, width = 220, height = 260) {
+  return {
+    x: Math.min(event.clientX, Math.max(12, window.innerWidth - width)),
+    y: Math.min(event.clientY, Math.max(12, window.innerHeight - height))
+  };
+}
+
+function disabledWatchServerReason(server, entry, templateKey) {
+  const template = server?.[templateKey] || "";
+  if (!template) {
+    return "No URL template configured.";
+  }
+  if (template.toLowerCase().includes("<malid>") && !entry.malId) {
+    return "This entry has no MAL ID.";
+  }
+  return "";
+}
+
+function buildDetailsServerOptions(watchNow, entry) {
+  const selectedServer = selectedWatchNowServer(watchNow);
+  return [
+    {
+      id: "__anilist__",
+      label: "AniList",
+      url: entry.siteUrl || "",
+      active: watchNow?.useAniListDetails === true || !selectedServer,
+      disabled: !entry.siteUrl,
+      reason: entry.siteUrl ? "" : "AniList URL is unavailable."
+    },
+    ...sortedWatchNowServers(watchNow).map((server) => {
+      const reason = disabledWatchServerReason(server, entry, "detailsUrlTemplate");
+      const url = reason ? "" : detailsUrlForServer(server, entry);
+      return {
+        id: server.id,
+        label: server.name || "Unnamed server",
+        url,
+        active: watchNow?.useAniListDetails !== true && server.id === selectedServer?.id,
+        disabled: !url,
+        reason: reason || (!url ? "Details URL could not be built." : "")
+      };
+    })
+  ];
+}
+
+function buildWatchServerOptions(watchNow, entry, episode) {
+  const servers = sortedWatchNowServers(watchNow);
+  if (servers.length === 0) {
+    return [{ id: "__empty__", label: "No Watch Now servers saved", url: "", disabled: true, reason: "" }];
+  }
+  return servers.map((server) => {
+    const reason = disabledWatchServerReason(server, entry, "watchUrlTemplate");
+    const url = reason ? "" : watchUrlForServer(server, entry, episode);
+    return {
+      id: server.id,
+      label: server.name || "Unnamed server",
+      url,
+      active: server.id === watchNow?.selectedServerId,
+      disabled: !url,
+      reason: reason || (!url ? "Watch URL could not be built." : "")
+    };
+  });
 }
 
 function availabilityAlertLabel({ showSubAlert, showDubAlert }) {
@@ -1176,6 +1344,84 @@ function ExportDialog({ open, loading, exporting, progress, onClose, onExport })
   );
 }
 
+function OfflineDisableDialog({ open, queued, busy, onSync, onDiscard, onCancel }) {
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !busy && onCancel()}>
+      <section className="choice-dialog offline-disable-dialog" role="dialog" aria-modal="true" aria-labelledby="offline-disable-title">
+        <div className="dialog-header">
+          <h2 id="offline-disable-title">Turn Off Offline Mode</h2>
+          <button type="button" className="icon-close" disabled={busy} onClick={onCancel} aria-label="Close offline mode options">
+            x
+          </button>
+        </div>
+        <div className="choice-dialog-body offline-disable-body">
+          <p>{queued} queued offline edit{queued === 1 ? "" : "s"} can be synced to AniList or discarded before Offline Mode is turned off.</p>
+          <div className="choice-actions">
+            <button type="button" className="secondary-button" disabled={busy} onClick={onCancel}>
+              Cancel
+            </button>
+            <button type="button" className="danger-button" disabled={busy} onClick={onDiscard}>
+              Discard edits
+            </button>
+            <button type="button" disabled={busy} onClick={onSync}>
+              {busy ? "Working..." : "Sync edits"}
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function OfflineSyncFailureDialog({ open, failures, busy, onRetry, onDiscard, onStayOffline }) {
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !busy && onStayOffline()}>
+      <section className="choice-dialog offline-sync-failure-dialog" role="dialog" aria-modal="true" aria-labelledby="offline-sync-failure-title">
+        <div className="dialog-header">
+          <h2 id="offline-sync-failure-title">Sync Failed</h2>
+          <button type="button" className="icon-close" disabled={busy} onClick={onStayOffline} aria-label="Close sync failure options">
+            x
+          </button>
+        </div>
+        <div className="choice-dialog-body offline-disable-body">
+          <p>{failures.length} queued edit{failures.length === 1 ? "" : "s"} could not sync.</p>
+          <div className="offline-failure-list">
+            {failures.map((item, index) => (
+              <article className="offline-queue-item" key={item.id || `${item.kind}-${item.mediaId}-${index}`}>
+                <strong>{item.title || "Queued item"}</strong>
+                <span>{item.summary || "Queued change"}</span>
+                {Array.isArray(item.details) && item.details.length > 1 ? (
+                  <small>{item.details.slice(1).join(" · ")}</small>
+                ) : null}
+                {item.error ? <small className="offline-failure-error">{item.error}</small> : null}
+              </article>
+            ))}
+          </div>
+          <div className="choice-actions offline-failure-actions">
+            <button type="button" className="secondary-button" disabled={busy} onClick={onStayOffline}>
+              Stay offline
+            </button>
+            <button type="button" className="danger-button" disabled={busy} onClick={onDiscard}>
+              Discard failed edits
+            </button>
+            <button type="button" disabled={busy} onClick={onRetry}>
+              {busy ? "Working..." : "Retry sync"}
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function AvailabilityOverrideDialog({ overrideTarget, onClose, onSave, onRemove }) {
   const entry = overrideTarget?.entry;
   const current = overrideTarget?.availability;
@@ -1344,6 +1590,65 @@ function RowTitleMenu({ menu, onClose }) {
   );
 }
 
+function WatchServerMenu({ menu, onClose }) {
+  useEffect(() => {
+    if (!menu) {
+      return undefined;
+    }
+    function closeOnKey(event) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+    window.addEventListener("click", onClose);
+    window.addEventListener("scroll", onClose, true);
+    window.addEventListener("keydown", closeOnKey);
+    return () => {
+      window.removeEventListener("click", onClose);
+      window.removeEventListener("scroll", onClose, true);
+      window.removeEventListener("keydown", closeOnKey);
+    };
+  }, [menu, onClose]);
+
+  if (!menu) {
+    return null;
+  }
+
+  function openOption(option) {
+    if (option.disabled || !option.url) {
+      return;
+    }
+    window.open(option.url, "_blank", "noreferrer");
+    onClose();
+  }
+
+  return (
+    <div
+      className="watch-server-menu"
+      style={{ left: menu.x, top: menu.y }}
+      onClick={(event) => event.stopPropagation()}
+      role="menu"
+      aria-label={menu.label}
+    >
+      <strong>{menu.label}</strong>
+      {menu.options.map((option) => (
+        <button
+          type="button"
+          role="menuitem"
+          className={option.active ? "active" : ""}
+          disabled={option.disabled}
+          title={option.reason || ""}
+          onClick={() => openOption(option)}
+          key={option.id}
+        >
+          <span>{option.label}</span>
+          {option.active ? <small>Active</small> : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function EntryPreviewContent({ entry }) {
   const previewSynopsis = useMemo(() => sanitizePreviewSynopsis(entry.descriptionHtml), [entry.descriptionHtml]);
   const previewGenres = Array.isArray(entry.genres) ? entry.genres.filter(Boolean) : [];
@@ -1438,7 +1743,84 @@ function FocusedEntryPreview({ entry, origin, onClose }) {
   );
 }
 
-function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activeStatus, availability, rating, watchNow, alertIconId, onRefreshNeeded, onAvailabilityOverride, onPreviewFocus, previewFocused, showNotes, onNoteError }) {
+function entrySubtitleDetails(entry) {
+  const synonyms = Array.isArray(entry.synonyms)
+    ? entry.synonyms.map((synonym) => String(synonym || "").trim()).filter(Boolean)
+    : [];
+  const romajiTitle = entry.romajiTitle || "";
+  const englishTitle = entry.englishTitle || "";
+  const trimmedRomajiTitle = romajiTitle.trim();
+  const trimmedEnglishTitle = englishTitle.trim();
+  const displayedTitle = String(entry.title || "").trim();
+  const showRomajiSubtitle = trimmedRomajiTitle && trimmedRomajiTitle !== displayedTitle;
+  const showSynonymSubtitle =
+    !showRomajiSubtitle &&
+    trimmedRomajiTitle &&
+    trimmedEnglishTitle &&
+    trimmedRomajiTitle === trimmedEnglishTitle &&
+    synonyms.length > 0;
+
+  return {
+    subtitle: showRomajiSubtitle ? romajiTitle : showSynonymSubtitle ? synonyms[0] : "",
+    synonyms
+  };
+}
+
+function EntrySubtitle({ entry, showSynonymInfoIcon }) {
+  const [tooltipOpen, setTooltipOpen] = useState(false);
+  const subtitleRef = useRef(null);
+  const { subtitle, synonyms } = entrySubtitleDetails(entry);
+  const showTooltip = Boolean(showSynonymInfoIcon && subtitle && synonyms.length > 0);
+
+  useEffect(() => {
+    if (!tooltipOpen) {
+      return undefined;
+    }
+
+    function closeOnOutsideClick(event) {
+      if (!subtitleRef.current?.contains(event.target)) {
+        setTooltipOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    return () => document.removeEventListener("pointerdown", closeOnOutsideClick);
+  }, [tooltipOpen]);
+
+  return (
+    <div ref={subtitleRef} className={showTooltip && tooltipOpen ? "subtitle synonym-subtitle open" : showTooltip ? "subtitle synonym-subtitle" : "subtitle"}>
+      <span>{subtitle}</span>
+      {showTooltip ? (
+        <>
+          <button
+            type="button"
+            className="synonym-info-button"
+            aria-label={`Show synonyms for ${entry.title}`}
+            aria-expanded={tooltipOpen}
+            onClick={() => setTooltipOpen((currentOpen) => !currentOpen)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setTooltipOpen(false);
+              }
+            }}
+          >
+            i
+          </button>
+          <span className="synonym-tooltip" role="tooltip">
+            <span className="synonym-tooltip-heading">Synonyms</span>
+            {synonyms.map((synonym, index) => (
+              <span className="synonym-tooltip-item" key={`${synonym}-${index}`}>
+                {synonym}
+              </span>
+            ))}
+          </span>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activeStatus, availability, rating, watchNow, alertIconId, showSynonymInfoIcon, onRefreshNeeded, onAvailabilityOverride, onPreviewFocus, previewFocused, showNotes, onNoteError, offlineMode, onOpenWatchServerMenu }) {
   const [moving, setMoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [titleMenu, setTitleMenu] = useState(null);
@@ -1456,6 +1838,27 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
       entry,
       x: Math.min(event.clientX, window.innerWidth - 180),
       y: Math.min(event.clientY, window.innerHeight - 132)
+    });
+  }
+
+  function openDetailsServerMenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    onOpenWatchServerMenu({
+      ...linkMenuPosition(event),
+      label: "Open Details With",
+      options: buildDetailsServerOptions(watchNow, entry)
+    });
+  }
+
+  function openEpisodeServerMenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const isNextEpisode = activeStatus === "CURRENT";
+    onOpenWatchServerMenu({
+      ...linkMenuPosition(event),
+      label: isNextEpisode ? "Open Next Episode With" : "Open Watch Now With",
+      options: buildWatchServerOptions(watchNow, entry, isNextEpisode ? nextEpisodeNumber(entry) : 1)
     });
   }
 
@@ -1520,28 +1923,42 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
       </button>
       <div className={`entry-main ${entry.nextAiringEpisode ? "has-airing-row" : ""}`}>
         <div className="title-line">
+          {offlineMode ? (
+          <span className="title-link offline-title" onContextMenu={openTitleMenu}>
+            {entry.title}
+          </span>
+          ) : (
           <a href={entry.siteUrl} target="_blank" rel="noreferrer" className="title-link" onContextMenu={openTitleMenu}>
             {entry.title}
           </a>
+          )}
           <RowTitleMenu menu={titleMenu} onClose={() => setTitleMenu(null)} />
         </div>
-        <div className="subtitle">{entry.romajiTitle && entry.romajiTitle !== entry.title ? entry.romajiTitle : ""}</div>
+        <EntrySubtitle entry={entry} showSynonymInfoIcon={showSynonymInfoIcon} />
         {entry.nextAiringEpisode ? <div className="airing">{formatAiring(entry.nextAiringEpisode)}</div> : null}
         <div className="availability-line">
+          {offlineMode ? (
+          <span className="watch-now-badge disabled-link-badge">
+            Details
+          </span>
+          ) : (
           <a
             href={detailsLink || entry.siteUrl}
             target="_blank"
             rel="noreferrer"
             className="watch-now-badge"
+            onContextMenu={openDetailsServerMenu}
           >
             Details
           </a>
-          {episodeLink ? (
+          )}
+          {episodeLink && !offlineMode ? (
             <a
               href={episodeLink}
               target="_blank"
               rel="noreferrer"
               className="next-episode-badge"
+              onContextMenu={openEpisodeServerMenu}
             >
               {activeStatus === "CURRENT" ? "Next Episode" : "Watch Now"}
             </a>
@@ -1574,8 +1991,9 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
         entry={entry}
         onUpdate={onUpdate}
         onRefreshNeeded={onRefreshNeeded}
-        shouldRefreshAtTotal={activeStatus !== "COMPLETED"}
-      />
+          shouldRefreshAtTotal={activeStatus !== "COMPLETED"}
+          offlineMode={offlineMode}
+        />
       <ScoreControl entry={entry} onUpdate={onUpdate} />
       {showNotes ? (
         <NoteControl entry={entry} onUpdate={onUpdate} onError={onNoteError} />
@@ -1602,7 +2020,7 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
   );
 }
 
-function AddSearchResultRow({ entry, availability, watchNow, alertIconId, onAdded, onPreviewFocus, previewFocused }) {
+function AddSearchResultRow({ entry, availability, watchNow, alertIconId, showSynonymInfoIcon, onAdded, onPreviewFocus, previewFocused, offlineMode, onOpenWatchServerMenu }) {
   const [targetStatus, setTargetStatus] = useState("PLANNING");
   const [adding, setAdding] = useState(false);
   const year = entryYear(entry);
@@ -1610,19 +2028,6 @@ function AddSearchResultRow({ entry, availability, watchNow, alertIconId, onAdde
   const publicScore = formatPublicScore(entry.publicScore);
   const listedStatus = entry.listStatus || entry.status;
   const detailsLink = detailsUrl(watchNow, entry);
-  const synonyms = Array.isArray(entry.synonyms)
-    ? entry.synonyms.map((synonym) => String(synonym || "").trim()).filter(Boolean)
-    : [];
-  const romajiTitle = entry.romajiTitle || "";
-  const englishTitle = entry.englishTitle || "";
-  const showRomajiSubtitle = romajiTitle && romajiTitle !== entry.title;
-  const showSynonymSubtitle =
-    !showRomajiSubtitle &&
-    romajiTitle.trim() &&
-    englishTitle.trim() &&
-    romajiTitle.trim() === englishTitle.trim() &&
-    synonyms.length > 0;
-  const subtitle = showRomajiSubtitle ? romajiTitle : showSynonymSubtitle ? synonyms[0] : "";
 
   async function addEntry() {
     setAdding(true);
@@ -1635,6 +2040,16 @@ function AddSearchResultRow({ entry, availability, watchNow, alertIconId, onAdde
     } finally {
       setAdding(false);
     }
+  }
+
+  function openDetailsServerMenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    onOpenWatchServerMenu({
+      ...linkMenuPosition(event),
+      label: "Open Details With",
+      options: buildDetailsServerOptions(watchNow, entry)
+    });
   }
 
   return (
@@ -1658,27 +2073,28 @@ function AddSearchResultRow({ entry, availability, watchNow, alertIconId, onAdde
       </button>
       <div className={`entry-main ${entry.nextAiringEpisode ? "has-airing-row" : ""}`}>
         <div className="title-line">
+          {offlineMode ? (
+          <span className="title-link offline-title">
+            {entry.title}
+          </span>
+          ) : (
           <a href={entry.siteUrl} target="_blank" rel="noreferrer" className="title-link">
             {entry.title}
           </a>
+          )}
         </div>
-        <div className={showSynonymSubtitle ? "subtitle add-synonym-subtitle" : "subtitle"} tabIndex={showSynonymSubtitle ? 0 : undefined}>
-          {subtitle}
-          {showSynonymSubtitle ? (
-            <span className="synonym-tooltip" role="tooltip">
-              {synonyms.map((synonym, index) => (
-                <span className="synonym-tooltip-item" key={`${synonym}-${index}`}>
-                  {synonym}
-                </span>
-              ))}
-            </span>
-          ) : null}
-        </div>
+        <EntrySubtitle entry={entry} showSynonymInfoIcon={showSynonymInfoIcon} />
         {entry.nextAiringEpisode ? <div className="airing">{formatAiring(entry.nextAiringEpisode)}</div> : null}
         <div className="availability-line">
-          <a href={detailsLink || entry.siteUrl} target="_blank" rel="noreferrer" className="watch-now-badge">
+          {offlineMode ? (
+          <span className="watch-now-badge disabled-link-badge">
+            Details
+          </span>
+          ) : (
+          <a href={detailsLink || entry.siteUrl} target="_blank" rel="noreferrer" className="watch-now-badge" onContextMenu={openDetailsServerMenu}>
             Details
           </a>
+          )}
           <AvailabilityBadge entry={entry} availability={availability} activeStatus={ADD_STATUS} watchNow={watchNow} alertIconId={alertIconId} />
         </div>
       </div>
@@ -1716,7 +2132,7 @@ function AddSearchResultRow({ entry, availability, watchNow, alertIconId, onAdde
               </option>
             ))}
           </select>
-          <button type="button" disabled={adding} onClick={addEntry}>
+          <button type="button" disabled={adding || offlineMode} onClick={addEntry}>
             {adding ? "Adding..." : "Add"}
           </button>
         </div>
@@ -1792,7 +2208,7 @@ function BulkMoveBar({ entries, selectedIds, activeStatus, onMoved, onClear }) {
   );
 }
 
-function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettingsChanged }) {
+function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettingsChanged, offlineMode }) {
   const [auth, setAuth] = useState(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -1915,6 +2331,10 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
   }
 
   function openAuthorizationLink() {
+    if (offlineMode) {
+      setError("Token authorization is disabled while Offline Mode is active.");
+      return;
+    }
     const normalizedClientId = clientId.trim();
     if (!/^\d+$/.test(normalizedClientId)) {
       setError("Enter the numeric AniList client ID first.");
@@ -2086,7 +2506,7 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
               {auth?.authError ? <div className="inline-warning">{auth.authError}</div> : null}
               <div className="settings-actions">
                 {auth?.cliImportAvailable && !auth?.portableTokenPresent ? (
-                  <button type="button" disabled={saving} onClick={importCliToken}>
+                  <button type="button" disabled={offlineMode || saving} onClick={importCliToken}>
                     Import from anilist-cli
                   </button>
                 ) : null}
@@ -2100,10 +2520,10 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
               <h3>Create Token</h3>
               <p>Use redirect URL https://anilist.co/api/v2/oauth/pin when creating or editing the AniList API client.</p>
               <div className="settings-actions">
-                <button type="button" onClick={() => window.open("https://anilist.co/login", "_blank", "noreferrer")}>
+                <button type="button" disabled={offlineMode} onClick={() => window.open("https://anilist.co/login", "_blank", "noreferrer")}>
                   Open AniList Login
                 </button>
-                <button type="button" onClick={() => window.open("https://anilist.co/settings/developer", "_blank", "noreferrer")}>
+                <button type="button" disabled={offlineMode} onClick={() => window.open("https://anilist.co/settings/developer", "_blank", "noreferrer")}>
                   Open AniList Developer Page
                 </button>
               </div>
@@ -2111,7 +2531,7 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
                 <span>Client ID</span>
                 <input value={clientId} onChange={(event) => setClientId(event.target.value.replace(/[^0-9]/g, ""))} inputMode="numeric" />
               </label>
-              <button type="button" className="token-auth-button" onClick={openAuthorizationLink}>
+              <button type="button" className="token-auth-button" disabled={offlineMode} onClick={openAuthorizationLink}>
                 Open token authorization link
               </button>
             </div>
@@ -2128,7 +2548,7 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
                   spellCheck="false"
                 />
               </label>
-              <button type="button" className="save-token-button" disabled={saving || tokenInput.trim().length === 0} onClick={saveToken}>
+              <button type="button" className="save-token-button" disabled={offlineMode || saving || tokenInput.trim().length === 0} onClick={saveToken}>
                 {saving ? "Saving..." : "Save token"}
               </button>
             </div>
@@ -2137,14 +2557,6 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
           <div className="settings-tab-panel">
             <div className="settings-section">
               <h3>Watch Now Links</h3>
-              <label className="checkbox-row">
-                <input type="checkbox" checked={showUnwatchedDubAlert} onChange={(event) => setShowUnwatchedDubAlert(event.target.checked)} />
-                Show alert when unwatched dub is available
-              </label>
-              <label className="checkbox-row">
-                <input type="checkbox" checked={showUnwatchedSubAlert} onChange={(event) => setShowUnwatchedSubAlert(event.target.checked)} />
-                Show alert when unwatched sub is available
-              </label>
               <label className="field-stack">
                 <span>Active server</span>
                 <select value={selectedServerId} onChange={(event) => setSelectedServerId(event.target.value)}>
@@ -2269,6 +2681,32 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
                 ))}
               </div>
             </div>
+            <div className="settings-section">
+              <h3>Watch Now Links</h3>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={showUnwatchedDubAlert} onChange={(event) => setShowUnwatchedDubAlert(event.target.checked)} />
+                Show alert when unwatched dub is available
+              </label>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={showUnwatchedSubAlert} onChange={(event) => setShowUnwatchedSubAlert(event.target.checked)} />
+                Show alert when unwatched sub is available
+              </label>
+              <button type="button" className="save-watch-settings-button" disabled={saving} onClick={saveWatchNowSettings}>
+                {saving ? "Saving..." : "Save alert settings"}
+              </button>
+            </div>
+            <div className="settings-section">
+              <h3>Synonyms</h3>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={settings.appearance.showSynonymInfoIcon}
+                  disabled={saving}
+                  onChange={(event) => saveAppearance({ showSynonymInfoIcon: event.target.checked })}
+                />
+                Show info icon for synonyms
+              </label>
+            </div>
           </div>
         )}
 
@@ -2332,6 +2770,16 @@ function App() {
   const [entries, setEntries] = useState([]);
   const [user, setUser] = useState(null);
   const [health, setHealth] = useState(null);
+  const [offline, setOffline] = useState({ enabled: false, queued: 0 });
+  const [offlineBusy, setOfflineBusy] = useState(false);
+  const [offlineProgress, setOfflineProgress] = useState("");
+  const [offlineNotice, setOfflineNotice] = useState(null);
+  const [offlineQueueOpen, setOfflineQueueOpen] = useState(false);
+  const [offlineQueue, setOfflineQueue] = useState({ queued: 0, items: [] });
+  const [offlineQueueLoading, setOfflineQueueLoading] = useState(false);
+  const [offlineQueueError, setOfflineQueueError] = useState("");
+  const [offlineDisableOpen, setOfflineDisableOpen] = useState(false);
+  const [offlineSyncFailures, setOfflineSyncFailures] = useState([]);
   const [settings, setSettings] = useState(() => defaultSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -2341,6 +2789,7 @@ function App() {
   const [exportNotice, setExportNotice] = useState(null);
   const [refreshChoiceOpen, setRefreshChoiceOpen] = useState(false);
   const [overrideTarget, setOverrideTarget] = useState(null);
+  const [watchServerMenu, setWatchServerMenu] = useState(null);
   const [query, setQuery] = useState("");
   const [addQuery, setAddQuery] = useState("");
   const [addSearchResults, setAddSearchResults] = useState([]);
@@ -2357,6 +2806,7 @@ function App() {
   const [availabilityProgress, setAvailabilityProgress] = useState({ checked: 0, total: 0 });
   const [availabilityWarning, setAvailabilityWarning] = useState("");
   const [showNotes, setShowNotes] = useState(() => defaultSettings().showNotes);
+  const [completeOnly, setCompleteOnly] = useState(false);
   const [incompleteOnly, setIncompleteOnly] = useState(false);
   const [dubOnly, setDubOnly] = useState(false);
   const [unwatchedAlertOnly, setUnwatchedAlertOnly] = useState(false);
@@ -2378,9 +2828,11 @@ function App() {
   const ratingAbortController = useRef(null);
   const completedProgressAbortController = useRef(null);
   const scrollRestoreRunId = useRef(0);
+  const offlineQueueRef = useRef(null);
   const alertsFilterEnabled = settings.watchNow.showUnwatchedDubAlert === true || settings.watchNow.showUnwatchedSubAlert === true;
   const activeUnwatchedAlertOnly = unwatchedAlertOnly && alertsFilterEnabled;
   const isAddTab = activeStatus === ADD_STATUS;
+  const offlineEnabled = offline?.enabled === true;
 
   async function load(status = activeStatus) {
     if (status === ADD_STATUS) {
@@ -2400,7 +2852,8 @@ function App() {
         return;
       }
       setHealth(healthPayload);
-      if (!healthPayload.tokenPresent) {
+      setOffline(healthPayload.offline || { enabled: false, queued: 0 });
+      if (!healthPayload.tokenPresent && healthPayload.offline?.enabled !== true) {
         setUser(null);
         setEntries([]);
         setAvailability({});
@@ -2419,16 +2872,20 @@ function App() {
       }
       setUser(listPayload.user);
       setEntries(listPayload.entries);
-      setAvailability({});
+      setOffline(listPayload.offline ? { ...(healthPayload.offline || {}), enabled: true, queued: listPayload.queued ?? healthPayload.offline?.queued ?? 0 } : healthPayload.offline || { enabled: false, queued: 0 });
+      setAvailability(listPayload.availability || {});
+      setRatings(listPayload.ratings || {});
       setAvailabilityProgress({ checked: 0, total: 0 });
       setAvailabilityWarning("");
       setSelectedIds(new Set());
-      const cacheOnly = hasRecentAutoAvailability(status);
-      if (!cacheOnly) {
-        markAutoAvailability(status);
+      if (!listPayload.offline) {
+        const cacheOnly = hasRecentAutoAvailability(status);
+        if (!cacheOnly) {
+          markAutoAvailability(status);
+        }
+        loadAvailability(listPayload.entries, false, { cacheOnly });
+        loadRatings(listPayload.entries);
       }
-      loadAvailability(listPayload.entries, false, { cacheOnly });
-      loadRatings(listPayload.entries);
     } catch (loadError) {
       if (loadError.name === "AbortError" || listRunId.current !== runId) {
         return;
@@ -2449,6 +2906,10 @@ function App() {
 
   function switchStatus(status) {
     if (status === activeStatus) {
+      return;
+    }
+    if (offlineEnabled && status === ADD_STATUS) {
+      setAvailabilityWarning("Add search is disabled while Offline Mode is active.");
       return;
     }
 
@@ -2481,6 +2942,7 @@ function App() {
     setSelectedIds(new Set());
     setRefreshChoiceOpen(false);
     setOverrideTarget(null);
+    setWatchServerMenu(null);
     setUpdatingCompletedProgress(false);
     setCompletedProgressUpdate({ checked: 0, total: 0 });
     setFocusedPreviewId(null);
@@ -2491,8 +2953,12 @@ function App() {
 
   async function loadSettings() {
     try {
-      const nextSettings = normalizeSettings(await api("/api/settings"));
+      const settingsPayload = await api("/api/settings");
+      const nextSettings = normalizeSettings(settingsPayload);
       setSettings(nextSettings);
+      if (settingsPayload.offline) {
+        setOffline(settingsPayload.offline);
+      }
       setShowNotes(nextSettings.showNotes);
     } catch {
       const fallbackSettings = defaultSettings();
@@ -2544,6 +3010,9 @@ function App() {
   }
 
   async function loadAvailability(entriesToCheck = entries, refresh = false, options = {}) {
+    if (offlineEnabled) {
+      return true;
+    }
     const runId = availabilityRunId.current + 1;
     availabilityRunId.current = runId;
     availabilityAbortController.current?.abort();
@@ -2620,6 +3089,9 @@ function App() {
   }
 
   async function loadRatings(entriesToCheck = entries) {
+    if (offlineEnabled) {
+      return;
+    }
     const ratingEntries = entriesToCheck.filter((entry) => entry.malId);
     const runId = ratingRunId.current + 1;
     ratingRunId.current = runId;
@@ -2711,6 +3183,10 @@ function App() {
   }
 
   async function recheckEpisodes() {
+    if (offlineEnabled) {
+      setAvailabilityWarning("Recheck Episodes is disabled while Offline Mode is active.");
+      return;
+    }
     if (isAddTab) {
       setAddAvailabilityReady(false);
       const completed = await loadAvailability(sortedAddSearchResults, true, { force: true });
@@ -2730,6 +3206,7 @@ function App() {
       [entry.mediaId]: payload.availability
     }));
     setOverrideTarget(null);
+    refreshOfflineStatus();
   }
 
   async function removeAvailabilityOverride(entry) {
@@ -2740,8 +3217,217 @@ function App() {
       delete nextAvailability[entry.mediaId];
       return nextAvailability;
     });
-    loadAvailability([entry], true, { force: true, background: true });
+    if (!offlineEnabled) {
+      loadAvailability([entry], true, { force: true, background: true });
+    }
+    refreshOfflineStatus();
   }
+
+  async function refreshOfflineStatus() {
+    try {
+      setOffline(await api("/api/offline"));
+      if (offlineQueueOpen) {
+        loadOfflineQueue();
+      }
+    } catch {
+      setOffline({ enabled: false, queued: 0 });
+    }
+  }
+
+  async function loadOfflineQueue() {
+    if (!offlineEnabled) {
+      setOfflineQueue({ queued: 0, items: [] });
+      return;
+    }
+    setOfflineQueueLoading(true);
+    setOfflineQueueError("");
+    try {
+      const payload = await api("/api/offline/queue");
+      setOfflineQueue({
+        queued: Number(payload.queued || 0),
+        items: Array.isArray(payload.items) ? payload.items : []
+      });
+    } catch (queueError) {
+      setOfflineQueueError(queueError.message);
+    } finally {
+      setOfflineQueueLoading(false);
+    }
+  }
+
+  function toggleOfflineQueue() {
+    if (!offlineEnabled) {
+      return;
+    }
+    setOfflineQueueOpen((open) => !open);
+  }
+
+  async function enableOfflineMode() {
+    if (!window.confirm("Enable Offline Mode? All lists and cover images will be packaged locally. Missing cached availability or ratings will be reported after packaging.")) {
+      return;
+    }
+    setOfflineBusy(true);
+    setOfflineNotice(null);
+    setOfflineProgress("Starting Offline Mode packaging...");
+    setError("");
+    try {
+      const started = await api("/api/offline/enable", { method: "POST" });
+      let job = started;
+      while (job.state !== "completed" && job.state !== "error") {
+        setOfflineProgress(job.message || "Packaging offline data...");
+        await sleep(800);
+        job = await api(`/api/offline/enable/${encodeURIComponent(job.jobId)}`);
+      }
+      if (job.state === "error") {
+        throw new Error(job.error || job.message || "Offline Mode packaging failed.");
+      }
+      const status = job.result || await api("/api/offline");
+      setOffline(status);
+      const warnings = [];
+      if (Number(status.missingAvailability) > 0) {
+        warnings.push(`availability missing for ${status.missingAvailability} entries`);
+      }
+      if (Number(status.missingRatings) > 0) {
+        warnings.push(`ratings missing for ${status.missingRatings} entries`);
+      }
+      if (Number(status.imageFailures) > 0) {
+        warnings.push(`${status.imageFailures} cover images missing`);
+      }
+      setOfflineNotice({
+        type: warnings.length > 0 ? "warning" : "success",
+        text: warnings.length > 0
+          ? `Offline Mode enabled; ${warnings.join("; ")}. Run Recheck Episodes before enabling next time to improve cached metadata.`
+          : `Offline Mode enabled with ${status.entryCount || 0} packaged entries.`
+      });
+      if (activeStatus === ADD_STATUS) {
+        switchStatus("CURRENT");
+      } else {
+        await load(activeStatus);
+      }
+    } catch (offlineError) {
+      setError(offlineError.message);
+    } finally {
+      setOfflineBusy(false);
+      setOfflineProgress("");
+    }
+  }
+
+  async function disableOfflineMode() {
+    const queued = Number(offline?.queued || 0);
+    if (queued > 0) {
+      setOfflineDisableOpen(true);
+      return;
+    }
+    await finishOfflineDisable({ discardQueued: false });
+  }
+
+  async function syncQueuedThenDisable() {
+    setOfflineDisableOpen(false);
+    setOfflineSyncFailures([]);
+    setOfflineBusy(true);
+    setOfflineNotice(null);
+    setOfflineProgress("Syncing queued edits...");
+    setError("");
+    try {
+      const syncPayload = await api("/api/offline/sync", { method: "POST" });
+      if (Number(syncPayload.failed || 0) > 0) {
+        setOfflineSyncFailures(Array.isArray(syncPayload.failures) ? syncPayload.failures : []);
+        setOffline(await api("/api/offline"));
+        await load(activeStatus === ADD_STATUS ? "CURRENT" : activeStatus);
+        return;
+      }
+      await finishOfflineDisable({ discardQueued: false, syncPayload });
+    } catch (offlineError) {
+      setError(offlineError.message);
+    } finally {
+      setOfflineBusy(false);
+      setOfflineProgress("");
+    }
+  }
+
+  async function discardQueuedThenDisable() {
+    setOfflineDisableOpen(false);
+    setOfflineSyncFailures([]);
+    await finishOfflineDisable({ discardQueued: true });
+  }
+
+  async function stayOfflineAfterSyncFailure() {
+    setOfflineSyncFailures([]);
+    await refreshOfflineStatus();
+    await load(activeStatus === ADD_STATUS ? "CURRENT" : activeStatus);
+  }
+
+  async function finishOfflineDisable({ discardQueued, syncPayload = null }) {
+    const removeData = window.confirm("Remove packaged offline data after Offline Mode is disabled?");
+    setOfflineBusy(true);
+    setOfflineNotice(null);
+    setOfflineProgress("Turning off Offline Mode...");
+    setError("");
+    try {
+      const payload = await api("/api/offline/disable", {
+        method: "POST",
+        body: JSON.stringify({ discardQueued, removeData })
+      });
+      setOffline(payload);
+      setOfflineNotice({
+        type: "success",
+        text: syncPayload
+          ? `Offline Mode disabled. Synced ${syncPayload.synced || 0} queued edit${syncPayload.synced === 1 ? "" : "s"}.`
+          : discardQueued
+            ? "Offline Mode disabled. Queued edits were discarded."
+          : "Offline Mode disabled."
+      });
+      await load(activeStatus === ADD_STATUS ? "CURRENT" : activeStatus);
+    } catch (offlineError) {
+      setError(offlineError.message);
+    } finally {
+      setOfflineBusy(false);
+      setOfflineProgress("");
+    }
+  }
+
+  function toggleOfflineMode() {
+    if (offlineEnabled) {
+      disableOfflineMode();
+    } else {
+      enableOfflineMode();
+    }
+  }
+
+  useEffect(() => {
+    if (!offlineEnabled && offlineQueueOpen) {
+      setOfflineQueueOpen(false);
+      setOfflineQueue({ queued: 0, items: [] });
+    }
+  }, [offlineEnabled, offlineQueueOpen]);
+
+  useEffect(() => {
+    if (offlineQueueOpen) {
+      loadOfflineQueue();
+    }
+  }, [offlineQueueOpen, offlineEnabled, offline?.queued]);
+
+  useEffect(() => {
+    if (!offlineQueueOpen) {
+      return undefined;
+    }
+
+    function closeQueuePopover(event) {
+      if (event.key === "Escape") {
+        setOfflineQueueOpen(false);
+        return;
+      }
+      if (event.type === "mousedown" && offlineQueueRef.current && !offlineQueueRef.current.contains(event.target)) {
+        setOfflineQueueOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", closeQueuePopover);
+    document.addEventListener("keydown", closeQueuePopover);
+    return () => {
+      document.removeEventListener("mousedown", closeQueuePopover);
+      document.removeEventListener("keydown", closeQueuePopover);
+    };
+  }, [offlineQueueOpen]);
 
   useEffect(() => {
     if (activeStatus !== ADD_STATUS) {
@@ -2760,10 +3446,11 @@ function App() {
     const filtered = entries.filter((entry) => {
       const matchesQuery = !normalizedQuery ||
         [entry.title, entry.romajiTitle, entry.nativeTitle, entry.notes].filter(Boolean).some((value) => value.toLowerCase().includes(normalizedQuery));
+      const matchesComplete = !completeOnly || isAvailabilityComplete(availability[entry.mediaId]);
       const matchesIncomplete = !incompleteOnly || isAvailabilityIncomplete(availability[entry.mediaId]);
       const matchesDub = !dubOnly || Number(availability[entry.mediaId]?.dubEpisodes || 0) > 0;
       const matchesUnwatchedAlert = !activeUnwatchedAlertOnly || Boolean(availabilityAlertState(entry, availability[entry.mediaId], activeStatus, settings.watchNow).label);
-      return matchesQuery && matchesIncomplete && matchesDub && matchesUnwatchedAlert;
+      return matchesQuery && matchesComplete && matchesIncomplete && matchesDub && matchesUnwatchedAlert;
     });
     return [...filtered].sort((a, b) => {
       const availabilityA = availability[a.mediaId] || {};
@@ -2808,7 +3495,7 @@ function App() {
       }
       return a.title.localeCompare(b.title);
     });
-  }, [activeStatus, activeUnwatchedAlertOnly, availability, entries, incompleteOnly, dubOnly, query, ratings, settings.watchNow, sortOrder]);
+  }, [activeStatus, activeUnwatchedAlertOnly, availability, completeOnly, entries, incompleteOnly, dubOnly, query, ratings, settings.watchNow, sortOrder]);
   const sortedAddSearchResults = useMemo(() => {
     return addSearchResults.filter((entry) => (
       !addDubOnly || Number(availability[entry.mediaId]?.dubEpisodes || 0) > 0
@@ -2886,7 +3573,7 @@ function App() {
     return () => document.removeEventListener("mousedown", closeOnBackground);
   }, [focusedPreviewEntry]);
 
-function updateEntry(updatedEntry, options = {}) {
+  function updateEntry(updatedEntry, options = {}) {
     if (options.removeFromCurrent) {
       setEntries((currentEntries) => currentEntries.filter((entry) => entry.mediaId !== updatedEntry.mediaId));
       setSelectedIds((current) => {
@@ -2894,6 +3581,9 @@ function updateEntry(updatedEntry, options = {}) {
         next.delete(updatedEntry.mediaId);
         return next;
       });
+      if (offlineEnabled) {
+        refreshOfflineStatus();
+      }
       return;
     }
     setEntries((currentEntries) =>
@@ -2919,6 +3609,9 @@ function updateEntry(updatedEntry, options = {}) {
         left: options.preserveScrollX,
         shouldContinue: () => scrollRestoreRunId.current === restoreRunId
       });
+    }
+    if (offlineEnabled) {
+      refreshOfflineStatus();
     }
   }
 
@@ -2949,6 +3642,11 @@ function updateEntry(updatedEntry, options = {}) {
   }
 
   async function searchAddAnime() {
+    if (offlineEnabled) {
+      setAddSearchError("AniList search is disabled while Offline Mode is active.");
+      setAddSearchResults([]);
+      return;
+    }
     const runId = addSearchRunId.current + 1;
     addSearchRunId.current = runId;
     const normalizedQuery = addQuery.trim();
@@ -3077,6 +3775,9 @@ function updateEntry(updatedEntry, options = {}) {
     const movedIds = new Set(mediaIds);
     setEntries((currentEntries) => currentEntries.filter((entry) => !movedIds.has(entry.mediaId)));
     setSelectedIds(new Set());
+    if (offlineEnabled) {
+      refreshOfflineStatus();
+    }
   }
 
   function removeDeleted(mediaId) {
@@ -3091,6 +3792,9 @@ function updateEntry(updatedEntry, options = {}) {
       next.delete(mediaId);
       return next;
     });
+    if (offlineEnabled) {
+      refreshOfflineStatus();
+    }
   }
 
   function actionTargetEntries() {
@@ -3344,8 +4048,52 @@ function updateEntry(updatedEntry, options = {}) {
       <section className="top-shell" aria-label="List controls">
         <header className="app-header">
           <div className="app-identity">
-            <h1>AniList Manager</h1>
-            <p>{user ? `Signed in as ${user.name}` : "Local list manager"}</p>
+            <img className="app-logo" src="/logo.png" alt="" aria-hidden="true" />
+            <div>
+              <h1>AniList Manager</h1>
+              <p>
+                {offlineEnabled ? (
+                  <span className="offline-status-wrap" ref={offlineQueueRef}>
+                    <button
+                      type="button"
+                      className="offline-status-badge"
+                      aria-expanded={offlineQueueOpen}
+                      aria-haspopup="dialog"
+                      onClick={toggleOfflineQueue}
+                    >
+                      Offline{Number(offline?.queued || 0) > 0 ? ` · ${offline.queued} queued` : ""}
+                    </button>
+                    {offlineQueueOpen ? (
+                      <section className="offline-queue-popover" role="dialog" aria-label="Queued offline changes">
+                        <div className="offline-queue-header">
+                          <strong>Queued Offline Changes</strong>
+                          <span>{Number(offlineQueue.queued || 0)} change{Number(offlineQueue.queued || 0) === 1 ? "" : "s"} waiting to sync</span>
+                        </div>
+                        {offlineQueueError ? <div className="inline-warning">{offlineQueueError}</div> : null}
+                        {offlineQueueLoading ? <div className="offline-queue-empty">Loading queued changes...</div> : null}
+                        {!offlineQueueLoading && !offlineQueueError && offlineQueue.items.length === 0 ? (
+                          <div className="offline-queue-empty">No queued changes.</div>
+                        ) : null}
+                        {!offlineQueueLoading && !offlineQueueError && offlineQueue.items.length > 0 ? (
+                          <div className="offline-queue-list">
+                            {offlineQueue.items.map((item, index) => (
+                              <article className="offline-queue-item" key={item.id || `${item.kind}-${item.mediaId}-${index}`}>
+                                <strong>{item.title || "Queued item"}</strong>
+                                <span>{item.summary || "Queued change"}</span>
+                                {Array.isArray(item.details) && item.details.length > 1 ? (
+                                  <small>{item.details.slice(1).join(" · ")}</small>
+                                ) : null}
+                                {item.createdAt ? <time>{formatQueueTimestamp(item.createdAt)}</time> : null}
+                              </article>
+                            ))}
+                          </div>
+                        ) : null}
+                      </section>
+                    ) : null}
+                  </span>
+                ) : user ? `Signed in as ${user.name}` : "Local list manager"}
+              </p>
+            </div>
           </div>
           <div className="header-actions command-group">
             <button type="button" onClick={() => setAboutOpen(true)}>
@@ -3354,14 +4102,12 @@ function updateEntry(updatedEntry, options = {}) {
             <button type="button" onClick={() => setSettingsOpen(true)}>
               Settings
             </button>
-            <button type="button" onClick={() => (isAddTab ? searchAddAnime() : load(activeStatus))}>
-              Reload
-            </button>
             <button
               type="button"
               className="refresh-availability"
-              disabled={availabilityLoading || (isAddTab ? addSearchLoading || sortedAddSearchResults.length === 0 : loading)}
+              disabled={offlineEnabled || availabilityLoading || (isAddTab ? addSearchLoading || sortedAddSearchResults.length === 0 : loading)}
               onClick={recheckEpisodes}
+              title={offlineEnabled ? "Disabled while Offline Mode is active." : ""}
             >
               {availabilityLoading
                 ? (availabilityProgress.total > 0 ? `Checking ${availabilityProgress.checked}/${availabilityProgress.total}...` : "Checking...")
@@ -3370,6 +4116,14 @@ function updateEntry(updatedEntry, options = {}) {
             {availabilityLoading ? (
               <button type="button" className="stop-refresh" onClick={cancelAvailabilityRefresh} aria-label="Stop episode recheck" title="Stop episode recheck" />
             ) : null}
+            <button
+              type="button"
+              className="donate-button"
+              title="Support development"
+              onClick={() => window.open("https://www.paypal.com/donate/?hosted_button_id=SE3XUHC7UEEUW", "_blank", "noreferrer")}
+            >
+              Donate <span className="heart" aria-hidden="true">❤</span>
+            </button>
           </div>
         </header>
 
@@ -3379,6 +4133,7 @@ function updateEntry(updatedEntry, options = {}) {
               <button
                 type="button"
                 key={status.value}
+                disabled={offlineEnabled && status.value === ADD_STATUS}
                 className={[
                   status.value === activeStatus ? "active" : "",
                   status.value === ADD_STATUS ? "add-tab" : ""
@@ -3411,8 +4166,8 @@ function updateEntry(updatedEntry, options = {}) {
             <button type="button" className="ghost-button" disabled={isAddTab || loading || exporting} onClick={() => setExportOpen(true)}>
               {exporting ? "Exporting..." : "Export"}
             </button>
-            <button type="button" className="ghost-button future-action" disabled title="Planned: package cached list data for offline use.">
-              Offline Mode
+            <button type="button" className={offlineEnabled ? "ghost-button offline-toggle active" : "ghost-button offline-toggle"} disabled={offlineBusy} onClick={toggleOfflineMode}>
+              {offlineBusy ? "Offline..." : offlineEnabled ? "Turn Off Offline" : "Offline Mode"}
             </button>
           </div>
         </div>
@@ -3424,6 +4179,7 @@ function updateEntry(updatedEntry, options = {}) {
                 <span>Search</span>
                 <input
                   value={addQuery}
+                  disabled={offlineEnabled}
                   onChange={(event) => setAddQuery(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
@@ -3432,12 +4188,12 @@ function updateEntry(updatedEntry, options = {}) {
                   }}
                   placeholder="Search AniList anime"
                 />
-                <button type="button" disabled={addSearchLoading} onClick={searchAddAnime}>
+                <button type="button" disabled={offlineEnabled || addSearchLoading} onClick={searchAddAnime}>
                   {addSearchLoading ? "Searching..." : "Search"}
                 </button>
                 <label className="add-search-option add-limit-box">
                   <span>Limit</span>
-                  <select value={addSearchLimit} disabled={addSearchLoading} onChange={(event) => setAddSearchLimit(event.target.value)}>
+                  <select value={addSearchLimit} disabled={offlineEnabled || addSearchLoading} onChange={(event) => setAddSearchLimit(event.target.value)}>
                     {ADD_SEARCH_LIMIT_OPTIONS.map((limit) => (
                       <option value={limit} key={limit}>
                         {limit === "all" ? "All" : limit}
@@ -3492,8 +4248,26 @@ function updateEntry(updatedEntry, options = {}) {
               <label className="filter-chip">
                 <input
                   type="checkbox"
+                  checked={completeOnly}
+                  onChange={(event) => {
+                    setCompleteOnly(event.target.checked);
+                    if (event.target.checked) {
+                      setIncompleteOnly(false);
+                    }
+                  }}
+                />
+                Complete
+              </label>
+              <label className="filter-chip">
+                <input
+                  type="checkbox"
                   checked={incompleteOnly}
-                  onChange={(event) => setIncompleteOnly(event.target.checked)}
+                  onChange={(event) => {
+                    setIncompleteOnly(event.target.checked);
+                    if (event.target.checked) {
+                      setCompleteOnly(false);
+                    }
+                  }}
                 />
                 Incomplete
               </label>
@@ -3540,6 +4314,7 @@ function updateEntry(updatedEntry, options = {}) {
         onClose={() => setSettingsOpen(false)}
         onAuthChanged={() => load(activeStatus)}
         settings={settings}
+        offlineMode={offlineEnabled}
         onSettingsChanged={(nextSettings) => setSettings(normalizeSettings(nextSettings))}
       />
 
@@ -3560,12 +4335,31 @@ function updateEntry(updatedEntry, options = {}) {
         onExport={exportEntries}
       />
 
+      <OfflineDisableDialog
+        open={offlineDisableOpen}
+        queued={Number(offline?.queued || 0)}
+        busy={offlineBusy}
+        onSync={syncQueuedThenDisable}
+        onDiscard={discardQueuedThenDisable}
+        onCancel={() => setOfflineDisableOpen(false)}
+      />
+
+      <OfflineSyncFailureDialog
+        open={offlineSyncFailures.length > 0}
+        failures={offlineSyncFailures}
+        busy={offlineBusy}
+        onRetry={syncQueuedThenDisable}
+        onDiscard={discardQueuedThenDisable}
+        onStayOffline={stayOfflineAfterSyncFailure}
+      />
+
       <AvailabilityOverrideDialog
         overrideTarget={overrideTarget}
         onClose={() => setOverrideTarget(null)}
         onSave={saveAvailabilityOverride}
         onRemove={removeAvailabilityOverride}
       />
+      <WatchServerMenu menu={watchServerMenu} onClose={() => setWatchServerMenu(null)} />
       <FocusedEntryPreview entry={focusedPreviewEntry} origin={focusedPreviewOrigin} onClose={closeFocusedPreview} />
 
       {error ? <div className="error-banner">{error}</div> : null}
@@ -3573,6 +4367,8 @@ function updateEntry(updatedEntry, options = {}) {
       {availabilityWarning ? <div className="warning-banner">{availabilityWarning}</div> : null}
       {isAddTab && addSearchNotice ? <div className="success-banner">{addSearchNotice}</div> : null}
       {exportNotice ? <div className={exportNotice.type === "warning" ? "warning-banner" : "success-banner"}>{exportNotice.text}</div> : null}
+      {offlineProgress ? <div className="warning-banner">{offlineProgress}</div> : null}
+      {offlineNotice ? <div className={offlineNotice.type === "warning" ? "warning-banner" : "success-banner"}>{offlineNotice.text}</div> : null}
 
       {!isAddTab ? (
         <BulkMoveBar
@@ -3597,9 +4393,12 @@ function updateEntry(updatedEntry, options = {}) {
                     availability={availability[entry.mediaId]}
                     watchNow={settings.watchNow}
                     alertIconId={settings.appearance.alertIcon}
+                    showSynonymInfoIcon={settings.appearance.showSynonymInfoIcon}
+                    offlineMode={offlineEnabled}
                     onAdded={updateAddSearchResult}
                     onPreviewFocus={openFocusedPreview}
                     previewFocused={Boolean(focusedPreviewEntry)}
+                    onOpenWatchServerMenu={setWatchServerMenu}
                   />
                 ))
               : null}
@@ -3622,10 +4421,13 @@ function updateEntry(updatedEntry, options = {}) {
                 rating={ratings[entry.mediaId]}
                 watchNow={settings.watchNow}
                 alertIconId={settings.appearance.alertIcon}
+                showSynonymInfoIcon={settings.appearance.showSynonymInfoIcon}
                 showNotes={showNotes}
                 onNoteError={setError}
+                offlineMode={offlineEnabled}
                 onPreviewFocus={openFocusedPreview}
                 previewFocused={Boolean(focusedPreviewEntry)}
+                onOpenWatchServerMenu={setWatchServerMenu}
                 onRefreshNeeded={() => load(activeStatus)}
                 onAvailabilityOverride={(entryToEdit, currentAvailability) => setOverrideTarget({ entry: entryToEdit, availability: currentAvailability })}
               />

@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>AniListManagerPortable</AssemblyName>
     <RootNamespace>AniListManagerPortable</RootNamespace>
+    <ApplicationIcon>Assets\AniListManager.ico</ApplicationIcon>
     <PublishAot>true</PublishAot>
     <InvariantGlobalization>false</InvariantGlobalization>
     <StripSymbols>true</StripSymbols>
