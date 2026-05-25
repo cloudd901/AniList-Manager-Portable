@@ -1021,6 +1021,20 @@ p {
   font-size: 20px;
 }
 
+.dialog-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.app-version {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .icon-close {
   width: 34px;
   min-height: 34px;

@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import packageInfo from "../package.json";
 import "./styles.css";
 
+const APP_VERSION = `v${packageInfo.version}`;
 const ADD_STATUS = "ADD";
 const LIST_STATUSES = [
   { value: "CURRENT", label: "Watching" },
@@ -2748,7 +2750,10 @@ function AboutDialog({ open, onClose }) {
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-dialog-title">
         <div className="dialog-header">
-          <h2 id="about-dialog-title">About</h2>
+          <div className="dialog-title-row">
+            <h2 id="about-dialog-title">About</h2>
+            <span className="app-version">{APP_VERSION}</span>
+          </div>
           <button type="button" className="icon-close" onClick={onClose} aria-label="Close about">
             x
           </button>
