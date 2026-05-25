@@ -189,7 +189,17 @@ function Generate-WebAssets {
 
 function Assert-NoForbiddenText {
     param([string]$Path)
-    foreach ($pattern in @("CloudD901", "C:\Scripts", ".nuget", "node_modules", "node.exe")) {
+    $forbiddenPatterns = [System.Collections.Generic.List[string]]::new()
+    foreach ($pattern in @($ProjectRoot, $BuildRoot, ".nuget", "node_modules", "node.exe")) {
+        if (-not [string]::IsNullOrWhiteSpace($pattern)) {
+            $forbiddenPatterns.Add($pattern)
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:USERNAME)) {
+        $forbiddenPatterns.Add($env:USERNAME)
+    }
+
+    foreach ($pattern in $forbiddenPatterns) {
         if (Select-String -LiteralPath $Path -SimpleMatch -Pattern $pattern -Quiet -ErrorAction SilentlyContinue) {
             throw "Release contains forbidden text '$pattern' in $Path"
         }

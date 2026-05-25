@@ -45,10 +45,10 @@ Goals:
 ## Testing and Rebuilding
 
 - For a quick web-only build check, run `npm run build` from `web\`.
-- To preview the React UI during development from PowerShell, prefer `Start-Process -FilePath npm.cmd -ArgumentList @('run','dev','--','--host','127.0.0.1','--port','5173') -WorkingDirectory 'C:\Scripts\AICodingProjects\anilist-manager-portable\web' -WindowStyle Hidden`; launching plain `npm` through `Start-Process` may fail to bind the dev server.
+- To preview the React UI during development from PowerShell, prefer `Start-Process -FilePath npm.cmd -ArgumentList @('run','dev','--','--host','127.0.0.1','--port','5173') -WorkingDirectory '<repo>\web' -WindowStyle Hidden`; launching plain `npm` through `Start-Process` may fail to bind the dev server.
 - After starting Vite, confirm it is serving with `Invoke-WebRequest -UseBasicParsing http://127.0.0.1:5173/`.
 - End users should not need Node or npm; dev-server notes apply only to local frontend development.
-- Release testing uses `C:\Scripts\AICodingProjects\anilist-manager-portable\release\AniListManagerPortable`.
+- Release testing uses `release\AniListManagerPortable`.
 - Use `scripts\rebuild-release-test.ps1` for release testing rebuilds. It rebuilds the release test folder without ZIP packaging, stops running `AniListManagerPortable` processes, backs up and restores `release\AniListManagerPortable\.runtime` and `release\AniListManagerPortable\data`, regenerates embedded web assets, and updates the executable.
 - `scripts\rebuild-release-test.ps1` retries `npm ci` once after stopping workspace frontend Node or esbuild processes if they lock `web\node_modules`.
 - Preserve release `data\*` during release testing rebuilds.
