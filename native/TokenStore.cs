@@ -71,11 +71,12 @@ internal sealed class TokenStore(AppPaths paths)
         return new JsonObject
         {
             ["showNotes"] = JsonUtil.Bool(config, "showNotes") ?? JsonUtil.Bool(config, "notesMode") == true,
-            ["appearance"] = PublicAppearance(appearance)
+            ["appearance"] = PublicAppearance(appearance),
+            ["updates"] = PublicUpdates(config["updates"] as JsonObject)
         };
     }
 
-    public JsonObject SavePublicSettings(JsonObject? appearanceInput = null, bool? showNotes = null)
+    public JsonObject SavePublicSettings(JsonObject? appearanceInput = null, JsonObject? updatesInput = null, bool? showNotes = null)
     {
         var config = paths.ReadPortableConfig();
         if (showNotes.HasValue)
@@ -113,6 +114,16 @@ internal sealed class TokenStore(AppPaths paths)
             }
             config["appearance"] = currentAppearance;
         }
+        if (updatesInput is not null)
+        {
+            var currentUpdates = config["updates"]?.DeepClone() as JsonObject ?? new JsonObject();
+            if (updatesInput.ContainsKey("autoCheckEnabled"))
+            {
+                currentUpdates["autoCheckEnabled"] = JsonUtil.Bool(updatesInput, "autoCheckEnabled")
+                    ?? throw new ApiException("Daily update checks must be true or false.", 400);
+            }
+            config["updates"] = currentUpdates;
+        }
         config["updatedAt"] = DateTimeOffset.UtcNow.ToString("O");
         paths.WritePortableConfig(config);
         return ReadPublicSettings();
@@ -124,6 +135,11 @@ internal sealed class TokenStore(AppPaths paths)
         ["accentTheme"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "accentTheme"), AccentThemes, "teal"),
         ["alertIcon"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "alertIcon"), AlertIcons, "green-dot"),
         ["showSynonymInfoIcon"] = JsonUtil.Bool(appearance ?? new JsonObject(), "showSynonymInfoIcon") ?? true
+    };
+
+    private static JsonObject PublicUpdates(JsonObject? updates) => new()
+    {
+        ["autoCheckEnabled"] = JsonUtil.Bool(updates ?? new JsonObject(), "autoCheckEnabled") ?? true
     };
 
     private static string NormalizedAppearanceValue(string? value, HashSet<string> allowedValues, string fallback)

@@ -440,6 +440,22 @@ p {
   color: var(--warning-text);
 }
 
+.about-button {
+  position: relative;
+}
+
+.update-marker {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--surface-muted);
+  border-radius: 999px;
+  background: var(--danger-fill);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger-fill) 22%, transparent);
+}
+
 .header-actions .donate-button .heart {
   font-size: 0.9em;
   margin-left: 0.25em;
@@ -1026,6 +1042,11 @@ p {
   align-items: baseline;
   gap: 10px;
   min-width: 0;
+}
+
+.update-info-toggle {
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .app-version {
@@ -2205,6 +2226,58 @@ p {
 .about-loading {
   color: var(--text-muted);
   margin: 0;
+}
+
+.update-info-view {
+  display: grid;
+  gap: 16px;
+}
+
+.update-summary {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.update-summary div {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.update-summary dt {
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.update-summary dd {
+  margin: 0;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.update-actions {
+  flex-wrap: wrap;
+}
+
+.update-instructions {
+  padding: 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+}
+
+.update-instructions ol {
+  margin: 0;
+  padding-left: 22px;
+  color: var(--text);
+}
+
+.update-release-notes h2 {
+  margin-top: 0;
 }
 
 /* ── Rendered README markdown ─────────────────────────────── */

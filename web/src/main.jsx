@@ -109,6 +109,9 @@ function defaultSettings() {
       showUnwatchedDubAlert: false,
       showUnwatchedSubAlert: false,
       servers: []
+    },
+    updates: {
+      autoCheckEnabled: true
     }
   };
 }
@@ -116,6 +119,7 @@ function defaultSettings() {
 function normalizeSettings(settings) {
   const watchNow = settings?.watchNow || {};
   const appearance = settings?.appearance || {};
+  const updates = settings?.updates || {};
   return {
     showNotes: settings?.showNotes === true,
     appearance: {
@@ -131,6 +135,9 @@ function normalizeSettings(settings) {
       showUnwatchedDubAlert: watchNow.showUnwatchedDubAlert === true,
       showUnwatchedSubAlert: watchNow.showUnwatchedSubAlert === true,
       servers: Array.isArray(watchNow.servers) ? watchNow.servers : []
+    },
+    updates: {
+      autoCheckEnabled: updates.autoCheckEnabled !== false
     }
   };
 }
@@ -446,6 +453,21 @@ function formatQueueTimestamp(value) {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit"
+  });
+}
+
+function formatUpdateDate(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleDateString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric"
   });
 }
 
@@ -2464,6 +2486,33 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
     }
   }
 
+  async function saveUpdateSettings(nextUpdates) {
+    const previousSettings = settings;
+    const optimisticSettings = normalizeSettings({
+      ...settings,
+      updates: {
+        ...settings.updates,
+        ...nextUpdates
+      }
+    });
+    onSettingsChanged(optimisticSettings);
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      onSettingsChanged(await api("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ updates: nextUpdates })
+      }));
+      setMessage("Update settings saved.");
+    } catch (settingsError) {
+      onSettingsChanged(previousSettings);
+      setError(settingsError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -2485,6 +2534,9 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
           </button>
           <button type="button" className={activeTab === "appearance" ? "active" : ""} onClick={() => setActiveTab("appearance")}>
             Appearance
+          </button>
+          <button type="button" className={activeTab === "updates" ? "active" : ""} onClick={() => setActiveTab("updates")}>
+            Updates
           </button>
         </div>
 
@@ -2630,7 +2682,7 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
               </button>
             </div>
           </div>
-        ) : (
+        ) : activeTab === "appearance" ? (
           <div className="settings-tab-panel">
             <div className="settings-section">
               <h3>Color Mode</h3>
@@ -2710,7 +2762,24 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
               </label>
             </div>
           </div>
-        )}
+        ) : null}
+
+        {activeTab === "updates" ? (
+          <div className="settings-tab-panel">
+            <div className="settings-section">
+              <h3>Updates</h3>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={settings.updates.autoCheckEnabled}
+                  disabled={saving}
+                  onChange={(event) => saveUpdateSettings({ autoCheckEnabled: event.target.checked })}
+                />
+                Check daily for updates
+              </label>
+            </div>
+          </div>
+        ) : null}
 
         {error ? <div className="error-banner compact">{error}</div> : null}
       </section>
@@ -2718,18 +2787,24 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
   );
 }
 
-function AboutDialog({ open, onClose }) {
+function AboutDialog({ open, onClose, updateInfo, onLoadUpdate, onCheckUpdate, onIgnoreUpdate }) {
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [activeView, setActiveView] = useState("about");
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState("");
 
   useEffect(() => {
     if (!open) {
       return;
     }
+    setActiveView("about");
+    setUpdateMessage("");
     setLoading(true);
     setError("");
     setContent("");
+    onLoadUpdate?.();
     api("/api/readme")
       .then((payload) => {
         setContent(parseMarkdown(payload.content || ""));
@@ -2746,6 +2821,37 @@ function AboutDialog({ open, onClose }) {
     return null;
   }
 
+  async function checkForUpdates() {
+    setUpdateBusy(true);
+    setUpdateMessage("");
+    try {
+      const payload = await onCheckUpdate();
+      setUpdateMessage(payload?.updateAvailable ? "Update information refreshed." : "You are on the latest available version.");
+    } catch (checkError) {
+      setUpdateMessage(checkError.message || "Could not check for updates.");
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  async function ignoreUpdate() {
+    setUpdateBusy(true);
+    setUpdateMessage("");
+    try {
+      await onIgnoreUpdate();
+      setUpdateMessage("This update has been ignored.");
+    } catch (ignoreError) {
+      setUpdateMessage(ignoreError.message || "Could not ignore this update.");
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  const updateAvailable = updateInfo?.updateAvailable === true;
+  const releaseNotes = updateInfo?.releaseNotes ? parseMarkdown(updateInfo.releaseNotes) : "";
+  const releaseDate = formatUpdateDate(updateInfo?.publishedAt);
+  const latestVersion = updateInfo?.latestTagName || (updateInfo?.latestVersion ? `v${updateInfo.latestVersion}` : "Unknown");
+
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-dialog-title">
@@ -2754,16 +2860,93 @@ function AboutDialog({ open, onClose }) {
             <h2 id="about-dialog-title">About</h2>
             <span className="app-version">{APP_VERSION}</span>
           </div>
+          <button type="button" className="update-info-toggle" onClick={() => setActiveView(activeView === "update" ? "about" : "update")}>
+            {activeView === "update" ? "View About" : "View Update Info"}
+          </button>
           <button type="button" className="icon-close" onClick={onClose} aria-label="Close about">
             x
           </button>
         </div>
         <div className="about-dialog-body">
-          {loading ? <p className="about-loading">Loading…</p> : null}
-          {error ? <div className="error-banner compact">{error}</div> : null}
-          {!loading && !error && content ? (
-            <div className="readme-content" dangerouslySetInnerHTML={{ __html: content }} />
-          ) : null}
+          {activeView === "about" ? (
+            <>
+              {loading ? <p className="about-loading">Loading…</p> : null}
+              {error ? <div className="error-banner compact">{error}</div> : null}
+              {!loading && !error && content ? (
+                <div className="readme-content" dangerouslySetInnerHTML={{ __html: content }} />
+              ) : null}
+            </>
+          ) : (
+            <section className="update-info-view">
+              <div className={updateAvailable ? "success-banner compact" : "inline-warning"}>
+                {updateAvailable ? "A newer version is available." : updateInfo?.error ? "Could not check updates." : "No update is currently available."}
+              </div>
+              {updateMessage ? <div className="success-banner compact">{updateMessage}</div> : null}
+              {updateInfo?.error ? <div className="error-banner compact">{updateInfo.error}</div> : null}
+
+              <dl className="update-summary">
+                <div>
+                  <dt>Installed version</dt>
+                  <dd>v{updateInfo?.currentVersion || APP_VERSION.replace(/^v/i, "")}</dd>
+                </div>
+                <div>
+                  <dt>{updateAvailable ? "Latest version" : "GitHub release"}</dt>
+                  <dd>{latestVersion}</dd>
+                </div>
+                {releaseDate ? (
+                  <div>
+                    <dt>Release date</dt>
+                    <dd>{releaseDate}</dd>
+                  </div>
+                ) : null}
+              </dl>
+
+              <div className="settings-actions update-actions">
+                {updateInfo?.releaseUrl ? (
+                  <button type="button" onClick={() => window.open(updateInfo.releaseUrl, "_blank", "noreferrer")}>
+                    View Release
+                  </button>
+                ) : null}
+                {updateAvailable && updateInfo?.downloadUrl ? (
+                  <button type="button" onClick={() => window.open(updateInfo.downloadUrl, "_blank", "noreferrer")}>
+                    Download ZIP
+                  </button>
+                ) : null}
+                {!updateAvailable ? (
+                  <button type="button" disabled={updateBusy} onClick={checkForUpdates}>
+                    {updateBusy ? "Checking..." : "Check for Updates"}
+                  </button>
+                ) : null}
+                {updateAvailable ? (
+                  <button type="button" className="ghost-button" disabled={updateBusy || updateInfo?.ignored} onClick={ignoreUpdate}>
+                    {updateInfo?.ignored ? "Update Ignored" : updateBusy ? "Ignoring..." : "Ignore this update"}
+                  </button>
+                ) : null}
+              </div>
+
+              {updateAvailable ? (
+                <div className="settings-section update-instructions">
+                  <h3>Update Instructions</h3>
+                  <ol>
+                    <li>Download the ZIP from the release.</li>
+                    <li>Exit AniList Manager Portable from the tray menu.</li>
+                    <li>Replace <code>AniListManagerPortable.exe</code> and <code>README.md</code> with the files from the ZIP.</li>
+                    <li>Keep the existing <code>data\</code> folder untouched.</li>
+                    <li>Restart AniList Manager Portable.</li>
+                  </ol>
+                </div>
+              ) : null}
+
+              <div className="readme-content update-release-notes">
+                <h2>Release Notes</h2>
+                {releaseNotes ? (
+                  <div dangerouslySetInnerHTML={{ __html: releaseNotes }} />
+                ) : (
+                  <p>No release notes are available yet.</p>
+                )}
+              </div>
+            </section>
+          )}
         </div>
       </section>
     </div>
@@ -2788,6 +2971,7 @@ function App() {
   const [settings, setSettings] = useState(() => defaultSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState("");
@@ -2838,6 +3022,7 @@ function App() {
   const activeUnwatchedAlertOnly = unwatchedAlertOnly && alertsFilterEnabled;
   const isAddTab = activeStatus === ADD_STATUS;
   const offlineEnabled = offline?.enabled === true;
+  const showUpdateMarker = updateInfo?.updateAvailable === true && updateInfo?.ignored !== true;
 
   async function load(status = activeStatus) {
     if (status === ADD_STATUS) {
@@ -2972,8 +3157,29 @@ function App() {
     }
   }
 
+  async function loadUpdateInfo() {
+    try {
+      setUpdateInfo(await api("/api/update"));
+    } catch (updateError) {
+      console.warn("Update info failed.", updateError);
+    }
+  }
+
+  async function checkUpdateInfo() {
+    const payload = await api("/api/update/check", { method: "POST" });
+    setUpdateInfo(payload);
+    return payload;
+  }
+
+  async function ignoreUpdateInfo() {
+    const payload = await api("/api/update/ignore", { method: "POST" });
+    setUpdateInfo(payload);
+    return payload;
+  }
+
   useEffect(() => {
     loadSettings();
+    loadUpdateInfo();
   }, []);
 
   useEffect(() => {
@@ -4101,8 +4307,9 @@ function App() {
             </div>
           </div>
           <div className="header-actions command-group">
-            <button type="button" onClick={() => setAboutOpen(true)}>
+            <button type="button" className={showUpdateMarker ? "about-button update-available" : "about-button"} onClick={() => setAboutOpen(true)}>
               About
+              {showUpdateMarker ? <span className="update-marker" aria-label="Update available" /> : null}
             </button>
             <button type="button" onClick={() => setSettingsOpen(true)}>
               Settings
@@ -4125,7 +4332,7 @@ function App() {
               type="button"
               className="donate-button"
               title="Support development"
-              onClick={() => window.open("https://www.paypal.com/donate/?hosted_button_id=SE3XUHC7UEEUW", "_blank", "noreferrer")}
+              onClick={() => window.open("https://www.paypal.com/donate/?hosted_button_id=JK8ZEGCDMWP94", "_blank", "noreferrer")}
             >
               Donate <span className="heart" aria-hidden="true">❤</span>
             </button>
@@ -4323,7 +4530,14 @@ function App() {
         onSettingsChanged={(nextSettings) => setSettings(normalizeSettings(nextSettings))}
       />
 
-      <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} />
+      <AboutDialog
+        open={aboutOpen}
+        onClose={() => setAboutOpen(false)}
+        updateInfo={updateInfo}
+        onLoadUpdate={loadUpdateInfo}
+        onCheckUpdate={checkUpdateInfo}
+        onIgnoreUpdate={ignoreUpdateInfo}
+      />
 
       <RefreshAvailabilityDialog
         open={refreshChoiceOpen}

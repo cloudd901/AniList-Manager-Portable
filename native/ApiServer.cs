@@ -5,7 +5,7 @@ using System.Text.Json.Nodes;
 
 namespace AniListManagerPortable;
 
-internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniListClient aniList, AvailabilityService availability, OfflineService offline, AppPaths paths)
+internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniListClient aniList, AvailabilityService availability, OfflineService offline, UpdateService updates, AppPaths paths)
 {
     private const string SessionHeaderName = "X-AniList-Manager-Session";
     private static readonly HashSet<string> ListStatuses = ["CURRENT", "PLANNING", "COMPLETED", "PAUSED", "DROPPED", "REPEATING"];
@@ -214,21 +214,37 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             await SendJsonAsync(context, 200, ReadPublicSettings().ToJsonString(JsonUtil.WriterOptions));
             return;
         }
+        if (method == "GET" && path == "/api/update")
+        {
+            await SendJsonAsync(context, 200, (await updates.GetAsync(false, cancellationToken)).ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "POST" && path == "/api/update/check")
+        {
+            await SendJsonAsync(context, 200, (await updates.GetAsync(true, cancellationToken)).ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "POST" && path == "/api/update/ignore")
+        {
+            await SendJsonAsync(context, 200, updates.IgnoreLatest().ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
         if (method == "PATCH" && path == "/api/settings")
         {
             var input = JsonNode.Parse(await ReadBodyAsync(context)) as JsonObject ?? new JsonObject();
             var watchNowInput = input["watchNow"] as JsonObject;
             var appearanceInput = input["appearance"] as JsonObject;
+            var updatesInput = input["updates"] as JsonObject;
             var showNotes = input.ContainsKey("showNotes")
                 ? JsonUtil.Bool(input, "showNotes") ?? throw new ApiException("Show Notes must be true or false.", 400)
                 : (bool?)null;
-            if (watchNowInput is null && appearanceInput is null && showNotes is null)
+            if (watchNowInput is null && appearanceInput is null && updatesInput is null && showNotes is null)
             {
-                throw new ApiException("Provide Appearance, Watch Now settings, or Show Notes.", 400);
+                throw new ApiException("Provide Appearance, Watch Now, Updates settings, or Show Notes.", 400);
             }
-            if (appearanceInput is not null || showNotes.HasValue)
+            if (appearanceInput is not null || updatesInput is not null || showNotes.HasValue)
             {
-                tokens.SavePublicSettings(appearanceInput, showNotes);
+                tokens.SavePublicSettings(appearanceInput, updatesInput, showNotes);
             }
             if (watchNowInput is not null)
             {

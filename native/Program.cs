@@ -24,7 +24,8 @@ internal static class Program
             var aniList = new AniListClient(http, tokens);
             var availability = new AvailabilityService(http, paths);
             var offline = new OfflineService(paths, aniList, availability, http);
-            var server = new ApiServer(tokens, watchNow, aniList, availability, offline, paths);
+            var updates = new UpdateService(http, paths);
+            var server = new ApiServer(tokens, watchNow, aniList, availability, offline, updates, paths);
             using var tray = new TrayApp(server, tokens);
             tray.Run();
             await server.StopAsync();

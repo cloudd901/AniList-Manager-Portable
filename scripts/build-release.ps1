@@ -11,6 +11,12 @@ $WebRoot = Join-Path $ProjectRoot "web"
 $NativeRoot = Join-Path $ProjectRoot "native"
 $Package = Get-Content -LiteralPath (Join-Path $WebRoot "package.json") -Raw | ConvertFrom-Json
 $Version = if ($Package.version) { [string]$Package.version } else { "0.1.0" }
+$VersionCore = ($Version -split "-", 2)[0]
+$VersionParts = @($VersionCore.Split("."))
+$VersionMajor = if ($VersionParts.Count -gt 0 -and $VersionParts[0]) { $VersionParts[0] } else { "0" }
+$VersionMinor = if ($VersionParts.Count -gt 1 -and $VersionParts[1]) { $VersionParts[1] } else { "0" }
+$VersionPatch = if ($VersionParts.Count -gt 2 -and $VersionParts[2]) { $VersionParts[2] } else { "0" }
+$AssemblyVersion = "$VersionMajor.$VersionMinor.$VersionPatch.0"
 
 if (-not $ReleaseRoot) {
     $ReleaseRoot = Join-Path $ProjectRoot "release"
@@ -345,6 +351,10 @@ try {
             -p:DebugSymbols=false `
             -p:StripSymbols=true `
             -p:IlcOptimizationPreference=Size `
+            -p:Version=$Version `
+            -p:AssemblyVersion=$AssemblyVersion `
+            -p:FileVersion=$AssemblyVersion `
+            -p:InformationalVersion=$Version `
             -o $PublishDir
         $aotSucceeded = $LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath (Join-Path $PublishDir "AniListManagerPortable.exe"))
         if (-not $aotSucceeded) {
@@ -368,6 +378,10 @@ try {
         -p:DebugType=None `
         -p:DebugSymbols=false `
         -p:TrimMode=partial `
+        -p:Version=$Version `
+        -p:AssemblyVersion=$AssemblyVersion `
+        -p:FileVersion=$AssemblyVersion `
+        -p:InformationalVersion=$Version `
         -o $PublishDir
     }
 
