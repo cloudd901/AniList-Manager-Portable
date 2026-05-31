@@ -9,6 +9,7 @@ internal sealed partial class UpdateService(HttpClient http, AppPaths paths)
 {
     private static readonly string GitHubOwner = string.Join("", ["cloud", "d901"]);
     private static readonly string ReleasesLatestUrl = $"https://api.github.com/repos/{GitHubOwner}/AniList-Manager-Portable/releases/latest";
+    private static readonly string ReleasesTagsUrl = $"https://api.github.com/repos/{GitHubOwner}/AniList-Manager-Portable/releases/tags/";
     private const string UserAgent = "AniListManagerPortable/1.0";
     private static readonly TimeSpan CheckInterval = TimeSpan.FromHours(24);
 
@@ -29,6 +30,11 @@ internal sealed partial class UpdateService(HttpClient http, AppPaths paths)
         {
             var release = await FetchLatestReleaseAsync(cancellationToken);
             updates["cachedRelease"] = release;
+            var currentRelease = await FetchCurrentReleaseAsync(CurrentVersion(), release, cancellationToken);
+            if (currentRelease is not null)
+            {
+                updates["cachedCurrentRelease"] = currentRelease;
+            }
             updates["lastCheckedAt"] = DateTimeOffset.UtcNow.ToString("O");
             config["updates"] = updates;
             paths.WritePortableConfig(config);
@@ -36,6 +42,11 @@ internal sealed partial class UpdateService(HttpClient http, AppPaths paths)
         }
         catch (Exception error)
         {
+            if (force)
+            {
+                updates.Remove("cachedRelease");
+                updates.Remove("ignoredVersion");
+            }
             updates["lastCheckedAt"] = DateTimeOffset.UtcNow.ToString("O");
             config["updates"] = updates;
             paths.WritePortableConfig(config);
@@ -62,11 +73,7 @@ internal sealed partial class UpdateService(HttpClient http, AppPaths paths)
 
     private async Task<JsonObject> FetchLatestReleaseAsync(CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, ReleasesLatestUrl);
-        request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-        request.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2026-03-10");
-
+        using var request = CreateGitHubRequest(ReleasesLatestUrl);
         using var response = await http.SendAsync(request, cancellationToken);
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!response.IsSuccessStatusCode)
@@ -74,6 +81,50 @@ internal sealed partial class UpdateService(HttpClient http, AppPaths paths)
             throw new InvalidOperationException($"GitHub update check failed with HTTP {(int)response.StatusCode}.");
         }
 
+        return ParseRelease(body);
+    }
+
+    private async Task<JsonObject?> FetchCurrentReleaseAsync(string currentVersion, JsonObject latestRelease, CancellationToken cancellationToken)
+    {
+        if (string.Equals(JsonUtil.String(latestRelease, "version"), currentVersion, StringComparison.OrdinalIgnoreCase))
+        {
+            return latestRelease.DeepClone() as JsonObject;
+        }
+
+        foreach (var tag in new[] { $"v{currentVersion}", currentVersion })
+        {
+            using var request = CreateGitHubRequest(ReleasesTagsUrl + Uri.EscapeDataString(tag));
+            using var response = await http.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                continue;
+            }
+
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            try
+            {
+                return ParseRelease(body);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private static HttpRequestMessage CreateGitHubRequest(string url)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+        request.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2026-03-10");
+        return request;
+    }
+
+    private static JsonObject ParseRelease(string body)
+    {
         var release = JsonNode.Parse(body) as JsonObject
             ?? throw new InvalidOperationException("GitHub returned an invalid release response.");
         var tagName = JsonUtil.String(release, "tag_name") ?? "";
@@ -100,8 +151,13 @@ internal sealed partial class UpdateService(HttpClient http, AppPaths paths)
     private static JsonObject BuildState(JsonObject updates, string status, string? error)
     {
         var release = updates["cachedRelease"] as JsonObject;
+        var currentRelease = updates["cachedCurrentRelease"] as JsonObject;
         var currentVersion = CurrentVersion();
         var latestVersion = JsonUtil.String(release, "version");
+        if (currentRelease is null && string.Equals(currentVersion, latestVersion, StringComparison.OrdinalIgnoreCase))
+        {
+            currentRelease = release;
+        }
         var comparison = CompareVersions(currentVersion, latestVersion);
         var updateAvailable = comparison > 0;
         var ignoredVersion = JsonUtil.String(updates, "ignoredVersion");
@@ -112,6 +168,11 @@ internal sealed partial class UpdateService(HttpClient http, AppPaths paths)
         return new JsonObject
         {
             ["currentVersion"] = currentVersion,
+            ["currentTagName"] = JsonUtil.String(currentRelease, "tagName"),
+            ["currentReleaseName"] = JsonUtil.String(currentRelease, "name"),
+            ["currentReleaseNotes"] = JsonUtil.String(currentRelease, "body") ?? "",
+            ["currentReleaseUrl"] = JsonUtil.String(currentRelease, "htmlUrl"),
+            ["currentPublishedAt"] = JsonUtil.String(currentRelease, "publishedAt"),
             ["latestVersion"] = latestVersion,
             ["latestTagName"] = JsonUtil.String(release, "tagName"),
             ["releaseName"] = JsonUtil.String(release, "name"),

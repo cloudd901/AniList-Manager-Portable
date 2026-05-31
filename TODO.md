@@ -10,7 +10,7 @@
 
 ## Upgrades
 
-- Implement update check or auto-update feature.
+- [x] Implement update check or auto-update feature.
 
 - Work on UI to help visually separate anime cards and elements.
 
