@@ -557,7 +557,7 @@ function sanitizePreviewSynopsis(value) {
 function parseMarkdown(md) {
   if (!md) return "";
 
-  const lines = md.split(/\r?\n/);
+  const lines = stripMarkdownSection(md, "screenshots").split(/\r?\n/);
   const html = [];
 
   let currentBlock = null; // null, 'ul', 'ol', 'table', 'p'
@@ -704,6 +704,36 @@ function parseMarkdown(md) {
   return html.join('\n');
 }
 
+function stripMarkdownSection(md, sectionName) {
+  const lines = md.split(/\r?\n/);
+  const filtered = [];
+  let skipping = false;
+  let skipLevel = 0;
+  const normalizedSectionName = sectionName.trim().toLowerCase();
+
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      const level = heading[1].length;
+      const title = heading[2].trim().toLowerCase().replace(/[:.!?]+$/g, "");
+      if (skipping && level <= skipLevel) {
+        skipping = false;
+      }
+      if (!skipping && title === normalizedSectionName) {
+        skipping = true;
+        skipLevel = level;
+        continue;
+      }
+    }
+
+    if (!skipping) {
+      filtered.push(line);
+    }
+  }
+
+  return filtered.join("\n").trim();
+}
+
 let apiSessionPromise = null;
 
 function requiresApiSession(path, method) {
@@ -752,6 +782,23 @@ async function api(path, options = {}, retrySession = true) {
     throw new Error(payload.error || `Request failed: ${response.status}`);
   }
   return payload;
+}
+
+function availabilityRequestEntries(entries) {
+  return entries.map((entry) => ({
+    mediaId: entry.mediaId,
+    malId: entry.malId,
+    status: entry.status,
+    title: entry.title,
+    romajiTitle: entry.romajiTitle,
+    englishTitle: entry.englishTitle,
+    nativeTitle: entry.nativeTitle,
+    synonyms: entry.synonyms || [],
+    endDate: entry.endDate,
+    format: entry.format,
+    mediaStatus: entry.mediaStatus,
+    totalEpisodes: entry.totalEpisodes
+  }));
 }
 
 function autoAvailabilityStorageKey(status) {
@@ -996,6 +1043,13 @@ function isAvailabilityComplete(availability) {
   const subEpisodes = Number(availability.subEpisodes);
   const dubEpisodes = Number(availability.dubEpisodes);
   return subEpisodes >= totalEpisodes && (dubEpisodes <= 0 || dubEpisodes >= totalEpisodes);
+}
+
+function isPermanentAvailability(availability) {
+  if (!availability || availability.cachePermanent !== true) {
+    return false;
+  }
+  return availability.matchConfidence === "high" || availability.source === "local-override" || availability.override === true;
 }
 
 function isAvailabilityMissing(availability) {
@@ -1945,7 +1999,7 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
           <EntryPreviewContent entry={entry} />
         </span>
       </button>
-      <div className={`entry-main ${entry.nextAiringEpisode ? "has-airing-row" : ""}`}>
+      <div className="entry-main">
         <div className="title-line">
           {offlineMode ? (
           <span className="title-link offline-title" onContextMenu={openTitleMenu}>
@@ -1958,36 +2012,38 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
           )}
           <RowTitleMenu menu={titleMenu} onClose={() => setTitleMenu(null)} />
         </div>
-        <EntrySubtitle entry={entry} showSynonymInfoIcon={showSynonymInfoIcon} />
-        {entry.nextAiringEpisode ? <div className="airing">{formatAiring(entry.nextAiringEpisode)}</div> : null}
-        <div className="availability-line">
-          {offlineMode ? (
-          <span className="watch-now-badge disabled-link-badge">
-            Details
-          </span>
-          ) : (
-          <a
-            href={detailsLink || entry.siteUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="watch-now-badge"
-            onContextMenu={openDetailsServerMenu}
-          >
-            Details
-          </a>
-          )}
-          {episodeLink && !offlineMode ? (
+        <div className="entry-detail-band">
+          <EntrySubtitle entry={entry} showSynonymInfoIcon={showSynonymInfoIcon} />
+          <div className="airing">{entry.nextAiringEpisode ? formatAiring(entry.nextAiringEpisode) : ""}</div>
+          <div className="availability-line">
+            {offlineMode ? (
+            <span className="watch-now-badge disabled-link-badge">
+              Details
+            </span>
+            ) : (
             <a
-              href={episodeLink}
+              href={detailsLink || entry.siteUrl}
               target="_blank"
               rel="noreferrer"
-              className="next-episode-badge"
-              onContextMenu={openEpisodeServerMenu}
+              className="watch-now-badge"
+              onContextMenu={openDetailsServerMenu}
             >
-              {activeStatus === "CURRENT" ? "Next Episode" : "Watch Now"}
+              Details
             </a>
-          ) : null}
-          <AvailabilityBadge entry={entry} availability={availability} activeStatus={activeStatus} watchNow={watchNow} alertIconId={alertIconId} onEdit={onAvailabilityOverride} />
+            )}
+            {episodeLink && !offlineMode ? (
+              <a
+                href={episodeLink}
+                target="_blank"
+                rel="noreferrer"
+                className="next-episode-badge"
+                onContextMenu={openEpisodeServerMenu}
+              >
+                {activeStatus === "CURRENT" ? "Next Episode" : "Watch Now"}
+              </a>
+            ) : null}
+            <AvailabilityBadge entry={entry} availability={availability} activeStatus={activeStatus} watchNow={watchNow} alertIconId={alertIconId} onEdit={onAvailabilityOverride} />
+          </div>
         </div>
       </div>
       <div className="meta-pill-stack" aria-label="Anime metadata">
@@ -2095,7 +2151,7 @@ function AddSearchResultRow({ entry, availability, watchNow, alertIconId, showSy
           <EntryPreviewContent entry={entry} />
         </span>
       </button>
-      <div className={`entry-main ${entry.nextAiringEpisode ? "has-airing-row" : ""}`}>
+      <div className="entry-main">
         <div className="title-line">
           {offlineMode ? (
           <span className="title-link offline-title">
@@ -2107,19 +2163,21 @@ function AddSearchResultRow({ entry, availability, watchNow, alertIconId, showSy
           </a>
           )}
         </div>
-        <EntrySubtitle entry={entry} showSynonymInfoIcon={showSynonymInfoIcon} />
-        {entry.nextAiringEpisode ? <div className="airing">{formatAiring(entry.nextAiringEpisode)}</div> : null}
-        <div className="availability-line">
-          {offlineMode ? (
-          <span className="watch-now-badge disabled-link-badge">
-            Details
-          </span>
-          ) : (
-          <a href={detailsLink || entry.siteUrl} target="_blank" rel="noreferrer" className="watch-now-badge" onContextMenu={openDetailsServerMenu}>
-            Details
-          </a>
-          )}
-          <AvailabilityBadge entry={entry} availability={availability} activeStatus={ADD_STATUS} watchNow={watchNow} alertIconId={alertIconId} />
+        <div className="entry-detail-band">
+          <EntrySubtitle entry={entry} showSynonymInfoIcon={showSynonymInfoIcon} />
+          <div className="airing">{entry.nextAiringEpisode ? formatAiring(entry.nextAiringEpisode) : ""}</div>
+          <div className="availability-line">
+            {offlineMode ? (
+            <span className="watch-now-badge disabled-link-badge">
+              Details
+            </span>
+            ) : (
+            <a href={detailsLink || entry.siteUrl} target="_blank" rel="noreferrer" className="watch-now-badge" onContextMenu={openDetailsServerMenu}>
+              Details
+            </a>
+            )}
+            <AvailabilityBadge entry={entry} availability={availability} activeStatus={ADD_STATUS} watchNow={watchNow} alertIconId={alertIconId} />
+          </div>
         </div>
       </div>
       <div className="meta-pill-stack" aria-label="Anime metadata">
@@ -2232,7 +2290,7 @@ function BulkMoveBar({ entries, selectedIds, activeStatus, onMoved, onClear }) {
   );
 }
 
-function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettingsChanged, offlineMode }) {
+function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettingsChanged, offlineMode, updateInfo, onCheckUpdate }) {
   const [auth, setAuth] = useState(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -2267,6 +2325,12 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
     setServerName("");
     setDetailsUrlTemplate("");
     setWatchUrlTemplate("");
+  }
+
+  function switchSettingsTab(tab) {
+    setActiveTab(tab);
+    setMessage("");
+    setError("");
   }
 
   async function loadAuth() {
@@ -2513,6 +2577,26 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
     }
   }
 
+  async function checkForUpdatesFromSettings() {
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const payload = await onCheckUpdate();
+      if (payload?.updateAvailable) {
+        setMessage(`Update available: v${payload.latestVersion}.`);
+      } else if (payload?.error) {
+        setMessage("Update check completed. No available update is currently cached.");
+      } else {
+        setMessage("You are on the latest available version.");
+      }
+    } catch (updateError) {
+      setError(updateError.message || "Could not check for updates.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -2526,16 +2610,16 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
         {message ? <div className="success-banner compact settings-status-banner">{message}</div> : null}
 
         <div className="settings-tabs" role="tablist" aria-label="Settings tabs">
-          <button type="button" className={activeTab === "auth" ? "active" : ""} onClick={() => setActiveTab("auth")}>
+          <button type="button" className={activeTab === "auth" ? "active" : ""} onClick={() => switchSettingsTab("auth")}>
             Authentication
           </button>
-          <button type="button" className={activeTab === "watch" ? "active" : ""} onClick={() => setActiveTab("watch")}>
+          <button type="button" className={activeTab === "watch" ? "active" : ""} onClick={() => switchSettingsTab("watch")}>
             Watch Now
           </button>
-          <button type="button" className={activeTab === "appearance" ? "active" : ""} onClick={() => setActiveTab("appearance")}>
+          <button type="button" className={activeTab === "appearance" ? "active" : ""} onClick={() => switchSettingsTab("appearance")}>
             Appearance
           </button>
-          <button type="button" className={activeTab === "updates" ? "active" : ""} onClick={() => setActiveTab("updates")}>
+          <button type="button" className={activeTab === "updates" ? "active" : ""} onClick={() => switchSettingsTab("updates")}>
             Updates
           </button>
         </div>
@@ -2777,6 +2861,22 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
                 />
                 Check daily for updates
               </label>
+              <dl className="auth-summary">
+                <div>
+                  <dt>Current</dt>
+                  <dd>v{updateInfo?.currentVersion || APP_VERSION.replace(/^v/i, "")}</dd>
+                </div>
+                <div>
+                  <dt>Latest</dt>
+                  <dd>{updateInfo?.latestVersion ? `v${updateInfo.latestVersion}` : "Not checked"}</dd>
+                </div>
+              </dl>
+              {updateInfo?.error ? <div className="inline-warning">{updateInfo.error}</div> : null}
+              <div className="settings-actions">
+                <button type="button" disabled={saving} onClick={checkForUpdatesFromSettings}>
+                  {saving ? "Checking..." : "Check for Updates"}
+                </button>
+              </div>
             </div>
           </div>
         ) : null}
@@ -2792,6 +2892,7 @@ function AboutDialog({ open, onClose, updateInfo, onLoadUpdate, onCheckUpdate, o
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [activeView, setActiveView] = useState("about");
+  const [releaseNotesView, setReleaseNotesView] = useState("update");
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateMessage, setUpdateMessage] = useState("");
 
@@ -2800,6 +2901,7 @@ function AboutDialog({ open, onClose, updateInfo, onLoadUpdate, onCheckUpdate, o
       return;
     }
     setActiveView("about");
+    setReleaseNotesView("update");
     setUpdateMessage("");
     setLoading(true);
     setError("");
@@ -2848,21 +2950,36 @@ function AboutDialog({ open, onClose, updateInfo, onLoadUpdate, onCheckUpdate, o
   }
 
   const updateAvailable = updateInfo?.updateAvailable === true;
-  const releaseNotes = updateInfo?.releaseNotes ? parseMarkdown(updateInfo.releaseNotes) : "";
+  const currentReleaseNotes = updateInfo?.currentReleaseNotes ? parseMarkdown(updateInfo.currentReleaseNotes) : "";
+  const updateReleaseNotes = updateInfo?.releaseNotes ? parseMarkdown(updateInfo.releaseNotes) : "";
+  const activeReleaseNotesView = updateAvailable ? releaseNotesView : "current";
+  const displayedReleaseNotes = activeReleaseNotesView === "current" ? currentReleaseNotes : updateReleaseNotes;
   const releaseDate = formatUpdateDate(updateInfo?.publishedAt);
-  const latestVersion = updateInfo?.latestTagName || (updateInfo?.latestVersion ? `v${updateInfo.latestVersion}` : "Unknown");
+  const currentVersion = updateInfo?.currentVersion || APP_VERSION.replace(/^v/i, "");
+  const latestVersion = updateInfo?.latestVersion || currentVersion;
+  const latestVersionLabel = `v${latestVersion}`;
+  const fallbackAboutNotes = currentReleaseNotes || updateReleaseNotes;
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-dialog-title">
+      <section className="about-dialog" role="dialog" aria-modal="true" aria-label="About">
         <div className="dialog-header">
-          <div className="dialog-title-row">
-            <h2 id="about-dialog-title">About</h2>
-            <span className="app-version">{APP_VERSION}</span>
+          <div className="about-dialog-tabs" role="tablist" aria-label="About tabs">
+            <button type="button" className={activeView === "about" ? "active" : ""} onClick={() => setActiveView("about")}>
+              About v{currentVersion}
+            </button>
+            <button
+              type="button"
+              className={[
+                activeView === "update" ? "active" : "",
+                updateAvailable && updateInfo?.ignored !== true ? "update-tab-alert" : ""
+              ].filter(Boolean).join(" ")}
+              onClick={() => setActiveView("update")}
+            >
+              Updates {latestVersionLabel}
+              {updateAvailable && updateInfo?.ignored !== true ? <span className="update-marker" aria-hidden="true" /> : null}
+            </button>
           </div>
-          <button type="button" className="update-info-toggle" onClick={() => setActiveView(activeView === "update" ? "about" : "update")}>
-            {activeView === "update" ? "View About" : "View Update Info"}
-          </button>
           <button type="button" className="icon-close" onClick={onClose} aria-label="Close about">
             x
           </button>
@@ -2875,23 +2992,32 @@ function AboutDialog({ open, onClose, updateInfo, onLoadUpdate, onCheckUpdate, o
               {!loading && !error && content ? (
                 <div className="readme-content" dangerouslySetInnerHTML={{ __html: content }} />
               ) : null}
+              {!loading && error && fallbackAboutNotes ? (
+                <div className="readme-content">
+                  <h1>AniList Manager Portable</h1>
+                  <p>README.md could not be loaded. Showing GitHub release notes instead.</p>
+                  <div dangerouslySetInnerHTML={{ __html: fallbackAboutNotes }} />
+                </div>
+              ) : null}
             </>
           ) : (
             <section className="update-info-view">
-              <div className={updateAvailable ? "success-banner compact" : "inline-warning"}>
-                {updateAvailable ? "A newer version is available." : updateInfo?.error ? "Could not check updates." : "No update is currently available."}
-              </div>
+              {updateAvailable || updateInfo?.error ? (
+                <div className={updateAvailable ? "success-banner compact" : "inline-warning"}>
+                  {updateAvailable ? "A newer version is available." : "Could not check updates."}
+                </div>
+              ) : null}
               {updateMessage ? <div className="success-banner compact">{updateMessage}</div> : null}
               {updateInfo?.error ? <div className="error-banner compact">{updateInfo.error}</div> : null}
 
               <dl className="update-summary">
                 <div>
                   <dt>Installed version</dt>
-                  <dd>v{updateInfo?.currentVersion || APP_VERSION.replace(/^v/i, "")}</dd>
+                  <dd>v{currentVersion}</dd>
                 </div>
                 <div>
                   <dt>{updateAvailable ? "Latest version" : "GitHub release"}</dt>
-                  <dd>{latestVersion}</dd>
+                  <dd>{latestVersionLabel}</dd>
                 </div>
                 {releaseDate ? (
                   <div>
@@ -2904,7 +3030,7 @@ function AboutDialog({ open, onClose, updateInfo, onLoadUpdate, onCheckUpdate, o
               <div className="settings-actions update-actions">
                 {updateInfo?.releaseUrl ? (
                   <button type="button" onClick={() => window.open(updateInfo.releaseUrl, "_blank", "noreferrer")}>
-                    View Release
+                    Open Release Page
                   </button>
                 ) : null}
                 {updateAvailable && updateInfo?.downloadUrl ? (
@@ -2939,8 +3065,18 @@ function AboutDialog({ open, onClose, updateInfo, onLoadUpdate, onCheckUpdate, o
 
               <div className="readme-content update-release-notes">
                 <h2>Release Notes</h2>
-                {releaseNotes ? (
-                  <div dangerouslySetInnerHTML={{ __html: releaseNotes }} />
+                {updateAvailable ? (
+                  <div className="release-notes-tabs" role="tablist" aria-label="Release notes">
+                    <button type="button" className={activeReleaseNotesView === "current" ? "active" : ""} onClick={() => setReleaseNotesView("current")}>
+                      Current v{currentVersion}
+                    </button>
+                    <button type="button" className={activeReleaseNotesView === "update" ? "active" : ""} onClick={() => setReleaseNotesView("update")}>
+                      Update {latestVersionLabel}
+                    </button>
+                  </div>
+                ) : null}
+                {displayedReleaseNotes ? (
+                  <div dangerouslySetInnerHTML={{ __html: displayedReleaseNotes }} />
                 ) : (
                   <p>No release notes are available yet.</p>
                 )}
@@ -3073,7 +3209,7 @@ function App() {
         if (!cacheOnly) {
           markAutoAvailability(status);
         }
-        loadAvailability(listPayload.entries, false, { cacheOnly });
+        loadAvailability(listPayload.entries, false, { cacheOnly, preloadReusableCache: true, background: cacheOnly });
         loadRatings(listPayload.entries);
       }
     } catch (loadError) {
@@ -3233,13 +3369,51 @@ function App() {
     const showProgress = !options.background;
     const forceRefresh = options.force === true;
     const cacheOnly = options.cacheOnly === true;
+    const preloadReusableCache = options.preloadReusableCache === true && !cacheOnly;
     setAvailabilityLoading(showProgress);
-    setAvailabilityProgress({ checked: 0, total: showProgress ? entriesToCheck.length : 0 });
+    setAvailabilityProgress({ checked: 0, total: showProgress && !preloadReusableCache ? entriesToCheck.length : 0 });
     setAvailabilityWarning("");
     try {
+      let entriesForRefresh = entriesToCheck;
+      if (preloadReusableCache && entriesToCheck.length > 0) {
+        const reusableMediaIds = new Set();
+        for (let index = 0; index < entriesToCheck.length; index += AVAILABILITY_CHUNK_SIZE) {
+          const chunk = entriesToCheck.slice(index, index + AVAILABILITY_CHUNK_SIZE);
+          const payload = await api("/api/availability/batch", {
+            method: "POST",
+            signal: abortController.signal,
+            body: JSON.stringify({
+              usableCacheOnly: true,
+              entries: availabilityRequestEntries(chunk)
+            })
+          });
+          if (availabilityRunId.current !== runId) {
+            return false;
+          }
+          const cachedEntries = payload.entries || [];
+          for (const entry of cachedEntries) {
+            reusableMediaIds.add(entry.mediaId);
+          }
+          if (cachedEntries.length > 0) {
+            setAvailability((currentAvailability) => ({
+              ...currentAvailability,
+              ...Object.fromEntries(cachedEntries.map((entry) => [entry.mediaId, entry]))
+            }));
+          }
+        }
+        entriesForRefresh = entriesToCheck.filter((entry) => !reusableMediaIds.has(entry.mediaId));
+        if (showProgress) {
+          setAvailabilityProgress({ checked: 0, total: entriesForRefresh.length });
+          if (entriesForRefresh.length === 0) {
+            setAvailabilityLoading(false);
+            return true;
+          }
+        }
+      }
+
       let index = 0;
-      while (index < entriesToCheck.length) {
-        const chunk = entriesToCheck.slice(index, index + AVAILABILITY_CHUNK_SIZE);
+      while (index < entriesForRefresh.length) {
+        const chunk = entriesForRefresh.slice(index, index + AVAILABILITY_CHUNK_SIZE);
         const payload = await api("/api/availability/batch", {
           method: "POST",
           signal: abortController.signal,
@@ -3247,20 +3421,7 @@ function App() {
             refresh,
             force: forceRefresh,
             cacheOnly,
-            entries: chunk.map((entry) => ({
-              mediaId: entry.mediaId,
-              malId: entry.malId,
-              status: entry.status,
-              title: entry.title,
-              romajiTitle: entry.romajiTitle,
-              englishTitle: entry.englishTitle,
-              nativeTitle: entry.nativeTitle,
-              synonyms: entry.synonyms || [],
-              endDate: entry.endDate,
-              format: entry.format,
-              mediaStatus: entry.mediaStatus,
-              totalEpisodes: entry.totalEpisodes
-            }))
+            entries: availabilityRequestEntries(chunk)
           })
         });
         if (availabilityRunId.current !== runId) {
@@ -3274,8 +3435,8 @@ function App() {
           const completedEntries = Number(payload.checked || 0) + Number(payload.cached || 0);
           setAvailabilityLoading(true);
           setAvailabilityProgress({
-            checked: Math.min(index + Math.max(completedEntries, payload.entries?.length || chunk.length), entriesToCheck.length),
-            total: entriesToCheck.length
+            checked: Math.min(index + Math.max(completedEntries, payload.entries?.length || chunk.length), entriesForRefresh.length),
+            total: entriesForRefresh.length
           });
         }
         index += chunk.length;
@@ -3378,19 +3539,24 @@ function App() {
 
   function startAvailabilityRefresh(mode) {
     const targets = actionTargetEntries();
-    const entriesToRefresh = mode === "missing"
+    const eligibleEntries = mode === "missing"
       ? targets.filter((entry) => isAvailabilityMissing(availability[entry.mediaId]))
       : mode === "airing"
         ? targets.filter((entry) => shouldRefreshAiringAvailability(entry, availability[entry.mediaId]))
         : targets;
     setRefreshChoiceOpen(false);
-    if (entriesToRefresh.length === 0) {
+    if (eligibleEntries.length === 0) {
       setAvailabilityWarning(mode === "airing"
         ? "No airing or dub-behind-sub availability entries in the current target set."
         : "No missing availability entries in the current target set.");
       return;
     }
-    loadAvailability(entriesToRefresh, true, { force: true });
+    const entriesToRefresh = eligibleEntries.filter((entry) => !isPermanentAvailability(availability[entry.mediaId]));
+    if (entriesToRefresh.length === 0) {
+      setAvailabilityWarning("No non-permanent availability entries in the current target set.");
+      return;
+    }
+    loadAvailability(entriesToRefresh, true, { force: true, preloadReusableCache: true });
   }
 
   async function recheckEpisodes() {
@@ -3400,7 +3566,13 @@ function App() {
     }
     if (isAddTab) {
       setAddAvailabilityReady(false);
-      const completed = await loadAvailability(sortedAddSearchResults, true, { force: true });
+      const entriesToRefresh = sortedAddSearchResults.filter((entry) => !isPermanentAvailability(availability[entry.mediaId]));
+      if (entriesToRefresh.length === 0) {
+        setAddAvailabilityReady(sortedAddSearchResults.length > 0);
+        setAvailabilityWarning("No non-permanent availability entries in the current target set.");
+        return;
+      }
+      const completed = await loadAvailability(entriesToRefresh, true, { force: true, preloadReusableCache: true });
       setAddAvailabilityReady(completed && sortedAddSearchResults.length > 0);
       return;
     }
@@ -3929,20 +4101,7 @@ function App() {
           method: "POST",
           body: JSON.stringify({
             cacheOnly: true,
-            entries: chunk.map((entry) => ({
-              mediaId: entry.mediaId,
-              malId: entry.malId,
-              status: entry.status,
-              title: entry.title,
-              romajiTitle: entry.romajiTitle,
-              englishTitle: entry.englishTitle,
-              nativeTitle: entry.nativeTitle,
-              synonyms: entry.synonyms || [],
-              endDate: entry.endDate,
-              format: entry.format,
-              mediaStatus: entry.mediaStatus,
-              totalEpisodes: entry.totalEpisodes
-            }))
+            entries: availabilityRequestEntries(chunk)
           })
         });
         if (addSearchRunId.current !== searchRunId) {
@@ -4024,20 +4183,7 @@ function App() {
         method: "POST",
         body: JSON.stringify({
           cacheOnly: true,
-          entries: chunk.map((entry) => ({
-            mediaId: entry.mediaId,
-            malId: entry.malId,
-            status: entry.status,
-            title: entry.title,
-            romajiTitle: entry.romajiTitle,
-            englishTitle: entry.englishTitle,
-            nativeTitle: entry.nativeTitle,
-            synonyms: entry.synonyms || [],
-            endDate: entry.endDate,
-            format: entry.format,
-            mediaStatus: entry.mediaStatus,
-            totalEpisodes: entry.totalEpisodes
-          }))
+          entries: availabilityRequestEntries(chunk)
         })
       });
       for (const availabilityEntry of payload.entries || []) {
@@ -4309,7 +4455,7 @@ function App() {
           <div className="header-actions command-group">
             <button type="button" className={showUpdateMarker ? "about-button update-available" : "about-button"} onClick={() => setAboutOpen(true)}>
               About
-              {showUpdateMarker ? <span className="update-marker" aria-label="Update available" /> : null}
+              {showUpdateMarker ? <span className="update-marker" aria-hidden="true" /> : null}
             </button>
             <button type="button" onClick={() => setSettingsOpen(true)}>
               Settings
@@ -4385,54 +4531,45 @@ function App() {
         </div>
 
         <section className={isAddTab ? "toolbar add-toolbar" : "toolbar"}>
-          <div className={isAddTab ? "search-stack add-search-stack" : "search-stack"}>
-            {isAddTab ? (
-              <div className="search-box add-search-box">
-                <span>Search</span>
-                <input
-                  value={addQuery}
-                  disabled={offlineEnabled}
-                  onChange={(event) => setAddQuery(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      searchAddAnime();
-                    }
-                  }}
-                  placeholder="Search AniList anime"
-                />
-                <button type="button" disabled={offlineEnabled || addSearchLoading} onClick={searchAddAnime}>
-                  {addSearchLoading ? "Searching..." : "Search"}
-                </button>
-                <label className="add-search-option add-limit-box">
-                  <span>Limit</span>
-                  <select value={addSearchLimit} disabled={offlineEnabled || addSearchLoading} onChange={(event) => setAddSearchLimit(event.target.value)}>
-                    {ADD_SEARCH_LIMIT_OPTIONS.map((limit) => (
-                      <option value={limit} key={limit}>
-                        {limit === "all" ? "All" : limit}
-                      </option>
-                    ))}
-                  </select>
+          <div className="toolbar-primary">
+            <div className={isAddTab ? "search-stack add-search-stack" : "search-stack"}>
+              {isAddTab ? (
+                <div className="search-box add-search-box">
+                  <span>Search</span>
+                  <input
+                    value={addQuery}
+                    disabled={offlineEnabled}
+                    onChange={(event) => setAddQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        searchAddAnime();
+                      }
+                    }}
+                    placeholder="Search AniList anime"
+                  />
+                  <button type="button" disabled={offlineEnabled || addSearchLoading} onClick={searchAddAnime}>
+                    {addSearchLoading ? "Searching..." : "Search"}
+                  </button>
+                  <label className="add-search-option add-limit-box">
+                    <span>Limit</span>
+                    <select value={addSearchLimit} disabled={offlineEnabled || addSearchLoading} onChange={(event) => setAddSearchLimit(event.target.value)}>
+                      {ADD_SEARCH_LIMIT_OPTIONS.map((limit) => (
+                        <option value={limit} key={limit}>
+                          {limit === "all" ? "All" : limit}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              ) : (
+                <label className="search-box">
+                  <span>Search</span>
+                  <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter titles or notes" />
                 </label>
-              </div>
-            ) : (
-              <label className="search-box">
-                <span>Search</span>
-                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter titles or notes" />
-              </label>
-            )}
-            {!isAddTab ? (
-              <label className="filter-chip select-visible-chip">
-                <input
-                  type="checkbox"
-                  checked={filteredEntries.length > 0 && filteredEntries.every((entry) => selectedIds.has(entry.mediaId))}
-                  onChange={(event) => selectVisible(event.target.checked)}
-                />
-                Select visible
-              </label>
-            ) : null}
-          </div>
-          {isAddTab ? (
-            <div className="filter-strip" aria-label="Add filters">
+              )}
+            </div>
+            {isAddTab ? (
+              <div className="filter-strip" aria-label="Add filters">
               <label className="filter-chip">
                 <input
                   type="checkbox"
@@ -4455,8 +4592,8 @@ function App() {
                 Dub available
               </label>
             </div>
-          ) : (
-            <div className="filter-strip" aria-label="List filters">
+            ) : (
+              <div className="filter-strip" aria-label="List filters">
               <label className="filter-chip">
                 <input
                   type="checkbox"
@@ -4504,18 +4641,31 @@ function App() {
                 Alerts
               </label>
             </div>
-          )}
-          <div className="list-state">
-            <label className="sort-box">
-              <span>Order</span>
-              <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value)}>
-                {SORT_OPTIONS.map((option) => (
-                  <option value={option.value} key={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            )}
+            <div className="list-state">
+              <label className="sort-box">
+                <span>Order</span>
+                <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value)}>
+                  {SORT_OPTIONS.map((option) => (
+                    <option value={option.value} key={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </div>
+          <div className="toolbar-secondary">
+            {!isAddTab ? (
+              <label className="filter-chip select-visible-chip">
+                <input
+                  type="checkbox"
+                  checked={filteredEntries.length > 0 && filteredEntries.every((entry) => selectedIds.has(entry.mediaId))}
+                  onChange={(event) => selectVisible(event.target.checked)}
+                />
+                Select visible
+              </label>
+            ) : null}
             <span className="count">{isAddTab ? `${sortedAddSearchResults.length} results` : `${filteredEntries.length} entries`}</span>
           </div>
         </section>
@@ -4528,6 +4678,8 @@ function App() {
         settings={settings}
         offlineMode={offlineEnabled}
         onSettingsChanged={(nextSettings) => setSettings(normalizeSettings(nextSettings))}
+        updateInfo={updateInfo}
+        onCheckUpdate={checkUpdateInfo}
       />
 
       <AboutDialog
