@@ -54,3 +54,25 @@ Goals:
 - Preserve release `data\*` during release testing rebuilds.
 - Use `scripts\build-release.ps1` directly only when a packaged ZIP release is requested.
 - Check the native publish output before reporting completion. If `link.exe` is unavailable, `scripts\build-release.ps1` falls back from Native AOT to trimmed self-contained single-file publish; report that distinction.
+
+## Release Versioning And Publishing
+
+- Use the previous release tag as the comparison base for release notes. For the v1.1.0 release, `v1.0.0` pointed at commit `5a3e933`.
+- Version bumps must update all version sources:
+  - `web\package.json`
+  - root and package entries in `web\package-lock.json`
+  - `<Version>`, `<AssemblyVersion>`, and `<FileVersion>` in `native\AniListManagerPortable.csproj`
+- The release ZIP name is derived from `web\package.json` by `scripts\build-release.ps1`, for example `AniListManagerPortable-1.1.0-win-x64.zip`.
+- Before release packaging, clean completed checked TODO items from `TODO.md` only after their content has been captured in release notes or docs. Keep still-open TODOs.
+- Validate on the release branch before merging:
+  - Run `npm run build` from `web\`.
+  - Run `scripts\rebuild-release-test.ps1`.
+  - Smoke test `release\AniListManagerPortable\AniListManagerPortable.exe` on `http://127.0.0.1:6767/`; confirm `/api/update` reports the target version and `/api/readme` loads.
+  - Confirm `release\AniListManagerPortable\AniListManagerPortable.exe` and `release\AniListManagerPortable\README.md` exist.
+- Commit release-prep edits on the release branch, then merge into `main`. For a release merge, use a normal merge commit rather than rebasing away release branch history.
+- Build the final packaged release from `main` with `scripts\build-release.ps1`.
+- Confirm the final ZIP exists under `release\` and that the publish output was Native AOT unless a fallback warning explicitly says trimmed self-contained single-file was used.
+- Tag `main` with an annotated release tag such as `v1.1.0`, then push `main` and the tag.
+- Publish the GitHub release as a ready release, not draft, attach the generated ZIP, and include concise release notes covering user-visible changes, public API changes, and manual update instructions.
+- If the GitHub connector does not expose release publishing tools, use GitHub's REST API with Git Credential Manager credentials from `git credential fill`. Keep credentials only in process variables and never print or commit them.
+- After publishing, verify the release URL, `draft=false`, `prerelease=false`, and the uploaded ZIP asset name and size through the GitHub Releases API.
