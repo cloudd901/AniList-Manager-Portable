@@ -784,6 +784,23 @@ async function api(path, options = {}, retrySession = true) {
   return payload;
 }
 
+function availabilityRequestEntries(entries) {
+  return entries.map((entry) => ({
+    mediaId: entry.mediaId,
+    malId: entry.malId,
+    status: entry.status,
+    title: entry.title,
+    romajiTitle: entry.romajiTitle,
+    englishTitle: entry.englishTitle,
+    nativeTitle: entry.nativeTitle,
+    synonyms: entry.synonyms || [],
+    endDate: entry.endDate,
+    format: entry.format,
+    mediaStatus: entry.mediaStatus,
+    totalEpisodes: entry.totalEpisodes
+  }));
+}
+
 function autoAvailabilityStorageKey(status) {
   return `${AUTO_AVAILABILITY_STORAGE_PREFIX}${status}`;
 }
@@ -1026,6 +1043,13 @@ function isAvailabilityComplete(availability) {
   const subEpisodes = Number(availability.subEpisodes);
   const dubEpisodes = Number(availability.dubEpisodes);
   return subEpisodes >= totalEpisodes && (dubEpisodes <= 0 || dubEpisodes >= totalEpisodes);
+}
+
+function isPermanentAvailability(availability) {
+  if (!availability || availability.cachePermanent !== true) {
+    return false;
+  }
+  return availability.matchConfidence === "high" || availability.source === "local-override" || availability.override === true;
 }
 
 function isAvailabilityMissing(availability) {
@@ -1975,7 +1999,7 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
           <EntryPreviewContent entry={entry} />
         </span>
       </button>
-      <div className={`entry-main ${entry.nextAiringEpisode ? "has-airing-row" : ""}`}>
+      <div className="entry-main">
         <div className="title-line">
           {offlineMode ? (
           <span className="title-link offline-title" onContextMenu={openTitleMenu}>
@@ -1988,36 +2012,38 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
           )}
           <RowTitleMenu menu={titleMenu} onClose={() => setTitleMenu(null)} />
         </div>
-        <EntrySubtitle entry={entry} showSynonymInfoIcon={showSynonymInfoIcon} />
-        {entry.nextAiringEpisode ? <div className="airing">{formatAiring(entry.nextAiringEpisode)}</div> : null}
-        <div className="availability-line">
-          {offlineMode ? (
-          <span className="watch-now-badge disabled-link-badge">
-            Details
-          </span>
-          ) : (
-          <a
-            href={detailsLink || entry.siteUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="watch-now-badge"
-            onContextMenu={openDetailsServerMenu}
-          >
-            Details
-          </a>
-          )}
-          {episodeLink && !offlineMode ? (
+        <div className="entry-detail-band">
+          <EntrySubtitle entry={entry} showSynonymInfoIcon={showSynonymInfoIcon} />
+          <div className="airing">{entry.nextAiringEpisode ? formatAiring(entry.nextAiringEpisode) : ""}</div>
+          <div className="availability-line">
+            {offlineMode ? (
+            <span className="watch-now-badge disabled-link-badge">
+              Details
+            </span>
+            ) : (
             <a
-              href={episodeLink}
+              href={detailsLink || entry.siteUrl}
               target="_blank"
               rel="noreferrer"
-              className="next-episode-badge"
-              onContextMenu={openEpisodeServerMenu}
+              className="watch-now-badge"
+              onContextMenu={openDetailsServerMenu}
             >
-              {activeStatus === "CURRENT" ? "Next Episode" : "Watch Now"}
+              Details
             </a>
-          ) : null}
-          <AvailabilityBadge entry={entry} availability={availability} activeStatus={activeStatus} watchNow={watchNow} alertIconId={alertIconId} onEdit={onAvailabilityOverride} />
+            )}
+            {episodeLink && !offlineMode ? (
+              <a
+                href={episodeLink}
+                target="_blank"
+                rel="noreferrer"
+                className="next-episode-badge"
+                onContextMenu={openEpisodeServerMenu}
+              >
+                {activeStatus === "CURRENT" ? "Next Episode" : "Watch Now"}
+              </a>
+            ) : null}
+            <AvailabilityBadge entry={entry} availability={availability} activeStatus={activeStatus} watchNow={watchNow} alertIconId={alertIconId} onEdit={onAvailabilityOverride} />
+          </div>
         </div>
       </div>
       <div className="meta-pill-stack" aria-label="Anime metadata">
@@ -2125,7 +2151,7 @@ function AddSearchResultRow({ entry, availability, watchNow, alertIconId, showSy
           <EntryPreviewContent entry={entry} />
         </span>
       </button>
-      <div className={`entry-main ${entry.nextAiringEpisode ? "has-airing-row" : ""}`}>
+      <div className="entry-main">
         <div className="title-line">
           {offlineMode ? (
           <span className="title-link offline-title">
@@ -2137,19 +2163,21 @@ function AddSearchResultRow({ entry, availability, watchNow, alertIconId, showSy
           </a>
           )}
         </div>
-        <EntrySubtitle entry={entry} showSynonymInfoIcon={showSynonymInfoIcon} />
-        {entry.nextAiringEpisode ? <div className="airing">{formatAiring(entry.nextAiringEpisode)}</div> : null}
-        <div className="availability-line">
-          {offlineMode ? (
-          <span className="watch-now-badge disabled-link-badge">
-            Details
-          </span>
-          ) : (
-          <a href={detailsLink || entry.siteUrl} target="_blank" rel="noreferrer" className="watch-now-badge" onContextMenu={openDetailsServerMenu}>
-            Details
-          </a>
-          )}
-          <AvailabilityBadge entry={entry} availability={availability} activeStatus={ADD_STATUS} watchNow={watchNow} alertIconId={alertIconId} />
+        <div className="entry-detail-band">
+          <EntrySubtitle entry={entry} showSynonymInfoIcon={showSynonymInfoIcon} />
+          <div className="airing">{entry.nextAiringEpisode ? formatAiring(entry.nextAiringEpisode) : ""}</div>
+          <div className="availability-line">
+            {offlineMode ? (
+            <span className="watch-now-badge disabled-link-badge">
+              Details
+            </span>
+            ) : (
+            <a href={detailsLink || entry.siteUrl} target="_blank" rel="noreferrer" className="watch-now-badge" onContextMenu={openDetailsServerMenu}>
+              Details
+            </a>
+            )}
+            <AvailabilityBadge entry={entry} availability={availability} activeStatus={ADD_STATUS} watchNow={watchNow} alertIconId={alertIconId} />
+          </div>
         </div>
       </div>
       <div className="meta-pill-stack" aria-label="Anime metadata">
@@ -3181,7 +3209,7 @@ function App() {
         if (!cacheOnly) {
           markAutoAvailability(status);
         }
-        loadAvailability(listPayload.entries, false, { cacheOnly });
+        loadAvailability(listPayload.entries, false, { cacheOnly, preloadReusableCache: true, background: cacheOnly });
         loadRatings(listPayload.entries);
       }
     } catch (loadError) {
@@ -3341,13 +3369,51 @@ function App() {
     const showProgress = !options.background;
     const forceRefresh = options.force === true;
     const cacheOnly = options.cacheOnly === true;
+    const preloadReusableCache = options.preloadReusableCache === true && !cacheOnly;
     setAvailabilityLoading(showProgress);
-    setAvailabilityProgress({ checked: 0, total: showProgress ? entriesToCheck.length : 0 });
+    setAvailabilityProgress({ checked: 0, total: showProgress && !preloadReusableCache ? entriesToCheck.length : 0 });
     setAvailabilityWarning("");
     try {
+      let entriesForRefresh = entriesToCheck;
+      if (preloadReusableCache && entriesToCheck.length > 0) {
+        const reusableMediaIds = new Set();
+        for (let index = 0; index < entriesToCheck.length; index += AVAILABILITY_CHUNK_SIZE) {
+          const chunk = entriesToCheck.slice(index, index + AVAILABILITY_CHUNK_SIZE);
+          const payload = await api("/api/availability/batch", {
+            method: "POST",
+            signal: abortController.signal,
+            body: JSON.stringify({
+              usableCacheOnly: true,
+              entries: availabilityRequestEntries(chunk)
+            })
+          });
+          if (availabilityRunId.current !== runId) {
+            return false;
+          }
+          const cachedEntries = payload.entries || [];
+          for (const entry of cachedEntries) {
+            reusableMediaIds.add(entry.mediaId);
+          }
+          if (cachedEntries.length > 0) {
+            setAvailability((currentAvailability) => ({
+              ...currentAvailability,
+              ...Object.fromEntries(cachedEntries.map((entry) => [entry.mediaId, entry]))
+            }));
+          }
+        }
+        entriesForRefresh = entriesToCheck.filter((entry) => !reusableMediaIds.has(entry.mediaId));
+        if (showProgress) {
+          setAvailabilityProgress({ checked: 0, total: entriesForRefresh.length });
+          if (entriesForRefresh.length === 0) {
+            setAvailabilityLoading(false);
+            return true;
+          }
+        }
+      }
+
       let index = 0;
-      while (index < entriesToCheck.length) {
-        const chunk = entriesToCheck.slice(index, index + AVAILABILITY_CHUNK_SIZE);
+      while (index < entriesForRefresh.length) {
+        const chunk = entriesForRefresh.slice(index, index + AVAILABILITY_CHUNK_SIZE);
         const payload = await api("/api/availability/batch", {
           method: "POST",
           signal: abortController.signal,
@@ -3355,20 +3421,7 @@ function App() {
             refresh,
             force: forceRefresh,
             cacheOnly,
-            entries: chunk.map((entry) => ({
-              mediaId: entry.mediaId,
-              malId: entry.malId,
-              status: entry.status,
-              title: entry.title,
-              romajiTitle: entry.romajiTitle,
-              englishTitle: entry.englishTitle,
-              nativeTitle: entry.nativeTitle,
-              synonyms: entry.synonyms || [],
-              endDate: entry.endDate,
-              format: entry.format,
-              mediaStatus: entry.mediaStatus,
-              totalEpisodes: entry.totalEpisodes
-            }))
+            entries: availabilityRequestEntries(chunk)
           })
         });
         if (availabilityRunId.current !== runId) {
@@ -3382,8 +3435,8 @@ function App() {
           const completedEntries = Number(payload.checked || 0) + Number(payload.cached || 0);
           setAvailabilityLoading(true);
           setAvailabilityProgress({
-            checked: Math.min(index + Math.max(completedEntries, payload.entries?.length || chunk.length), entriesToCheck.length),
-            total: entriesToCheck.length
+            checked: Math.min(index + Math.max(completedEntries, payload.entries?.length || chunk.length), entriesForRefresh.length),
+            total: entriesForRefresh.length
           });
         }
         index += chunk.length;
@@ -3486,19 +3539,24 @@ function App() {
 
   function startAvailabilityRefresh(mode) {
     const targets = actionTargetEntries();
-    const entriesToRefresh = mode === "missing"
+    const eligibleEntries = mode === "missing"
       ? targets.filter((entry) => isAvailabilityMissing(availability[entry.mediaId]))
       : mode === "airing"
         ? targets.filter((entry) => shouldRefreshAiringAvailability(entry, availability[entry.mediaId]))
         : targets;
     setRefreshChoiceOpen(false);
-    if (entriesToRefresh.length === 0) {
+    if (eligibleEntries.length === 0) {
       setAvailabilityWarning(mode === "airing"
         ? "No airing or dub-behind-sub availability entries in the current target set."
         : "No missing availability entries in the current target set.");
       return;
     }
-    loadAvailability(entriesToRefresh, true, { force: true });
+    const entriesToRefresh = eligibleEntries.filter((entry) => !isPermanentAvailability(availability[entry.mediaId]));
+    if (entriesToRefresh.length === 0) {
+      setAvailabilityWarning("No non-permanent availability entries in the current target set.");
+      return;
+    }
+    loadAvailability(entriesToRefresh, true, { force: true, preloadReusableCache: true });
   }
 
   async function recheckEpisodes() {
@@ -3508,7 +3566,13 @@ function App() {
     }
     if (isAddTab) {
       setAddAvailabilityReady(false);
-      const completed = await loadAvailability(sortedAddSearchResults, true, { force: true });
+      const entriesToRefresh = sortedAddSearchResults.filter((entry) => !isPermanentAvailability(availability[entry.mediaId]));
+      if (entriesToRefresh.length === 0) {
+        setAddAvailabilityReady(sortedAddSearchResults.length > 0);
+        setAvailabilityWarning("No non-permanent availability entries in the current target set.");
+        return;
+      }
+      const completed = await loadAvailability(entriesToRefresh, true, { force: true, preloadReusableCache: true });
       setAddAvailabilityReady(completed && sortedAddSearchResults.length > 0);
       return;
     }
@@ -4037,20 +4101,7 @@ function App() {
           method: "POST",
           body: JSON.stringify({
             cacheOnly: true,
-            entries: chunk.map((entry) => ({
-              mediaId: entry.mediaId,
-              malId: entry.malId,
-              status: entry.status,
-              title: entry.title,
-              romajiTitle: entry.romajiTitle,
-              englishTitle: entry.englishTitle,
-              nativeTitle: entry.nativeTitle,
-              synonyms: entry.synonyms || [],
-              endDate: entry.endDate,
-              format: entry.format,
-              mediaStatus: entry.mediaStatus,
-              totalEpisodes: entry.totalEpisodes
-            }))
+            entries: availabilityRequestEntries(chunk)
           })
         });
         if (addSearchRunId.current !== searchRunId) {
@@ -4132,20 +4183,7 @@ function App() {
         method: "POST",
         body: JSON.stringify({
           cacheOnly: true,
-          entries: chunk.map((entry) => ({
-            mediaId: entry.mediaId,
-            malId: entry.malId,
-            status: entry.status,
-            title: entry.title,
-            romajiTitle: entry.romajiTitle,
-            englishTitle: entry.englishTitle,
-            nativeTitle: entry.nativeTitle,
-            synonyms: entry.synonyms || [],
-            endDate: entry.endDate,
-            format: entry.format,
-            mediaStatus: entry.mediaStatus,
-            totalEpisodes: entry.totalEpisodes
-          }))
+          entries: availabilityRequestEntries(chunk)
         })
       });
       for (const availabilityEntry of payload.entries || []) {

@@ -42,18 +42,21 @@ The app stores user data beside the executable. Do not share the `data` folder i
 ## Main Features
 
 - Browse AniList anime lists by status: Watching, Planning, Completed, Paused, Dropped, and Repeating.
-- Search and order the active list.
+- Search, filter, and order the active list.
+- Search AniList from the Add tab, add anime to a chosen list, and optionally filter add-search results by exact title or cached dub availability.
 - Update watched progress, AniList score, and list status.
 - Remove list entries individually or in bulk.
 - Use bulk progress, status, delete, and local note actions for selected rows.
 - Package lists and cover images for Offline Mode, queue list edits while offline, and sync or discard queued edits when returning online.
 - View availability badges with total, subbed, and dubbed episode counts when lookup data is available.
-- Refresh availability for all rows, missing rows, or currently airing rows.
+- Recheck availability for all rows, missing rows, or currently airing rows while reusing permanent high-confidence local cache entries.
 - Right-click an availability badge to save local availability overrides.
 - Use local notes mode without writing notes to AniList.
 - Open anime detail links through AniList or a configured Watch Now server and open next-episode links when a Watch URL is available.
 - Preview a thumbnail cover with the anime synopsis and genres on hover or keyboard focus, or click it to keep one centered preview open.
 - Show metadata pills for year or airing state, AniList format, and MAL content rating when available.
+- Export filtered rows or all lists as a full CSV file or MyAnimeList import XML.
+- Check GitHub releases from About or Settings and open the release ZIP manually when an update is available.
 
 ## Tray App
 
@@ -105,6 +108,8 @@ Availability counts are best-effort metadata. Provider matches can be incomplete
 
 MAL content rating pills such as `PG-13`, `R`, and `R+` are loaded separately from AniList. Successful rating lookups are reused from `data\mal-cache.json` on later loads instead of periodically refetching the rating. Rating lookup failures do not block list loading.
 
+`Recheck Episodes` refreshes non-permanent entries and skips cached entries marked as permanent high-confidence matches or local overrides. The refresh dialog can target missing entries, airing or dub-behind-sub entries, or the current target set.
+
 ## Watch Now Settings
 
 `Settings > Watch Now` manages the server list used by the `Details` and `Next Episode` links.
@@ -119,13 +124,30 @@ Use `Offline Mode` from the main toolbar to package your AniList lists, local me
 
 Progress, score, status, note, and remove actions made while offline are queued locally. When you turn Offline Mode off, the app can sync queued AniList edits or discard them. You can also choose whether to keep or remove the packaged offline data after disabling Offline Mode.
 
+## Export
+
+Use `Export` from the main toolbar to download either the currently filtered rows or all AniList status lists.
+
+- `Full CSV Export` includes AniList fields, local notes, availability counts, MAL ratings, and Watch Now link metadata when cached.
+- `MyAnimeList Import XML` exports list status, progress, score, comments, and MAL IDs for entries that have a MAL mapping.
+
 ## Appearance Settings
 
 `Settings > Appearance` applies the app palette immediately and saves it in `data\config.json`.
 
 - Color mode can be Light, Soft, Dim, Dark, or System.
 - Accent theme can be Blue, Teal, or Rose.
-- Profiles without Appearance settings keep the Light + Blue default until changed.
+- Alert icon can be Triangle, Beacon, Bolt, Dot, or Green Dot.
+- The synonym info icon can be shown or hidden.
+- Profiles without Appearance settings use Soft + Teal with the Green Dot alert icon until changed.
+
+## Update Checks
+
+The app can check GitHub releases for a newer portable ZIP.
+
+- `Settings > Updates` controls the daily automatic update check and can run a manual check.
+- `About > Updates` shows the current version, latest release information, release notes, download link, and an ignore action for the currently available update.
+- Updates are not installed in place. Download the ZIP, exit the app, and replace `AniListManagerPortable.exe` and `README.md` with the files from the release while keeping your `data` folder.
 
 ## External Sites And APIs
 
@@ -137,6 +159,7 @@ The app calls these services directly:
 | `https://allanime-api.shashankbhake.codes` | Primary sub/dub availability search metadata for episode count badges. |
 | `https://api.allanime.day/api` | Fallback availability provider lookup when the hosted availability API is unavailable or insufficient. |
 | `https://api.jikan.moe/v4/anime/{malId}` | MAL metadata used for corrected finished totals and content rating pills. |
+| `https://api.github.com/repos/<owner>/AniList-Manager-Portable/releases/...` | Update checks, current release notes, latest release notes, and portable ZIP download metadata. |
 
 The app opens these AniList web pages from Settings:
 
@@ -148,8 +171,19 @@ The app opens these AniList web pages from Settings:
 
 The active Watch Now server is opened by your browser when it supplies the selected `Details` or `Next Episode` URL.
 
+The Donate button opens PayPal in your browser at `https://www.paypal.com/donate/?hosted_button_id=JK8ZEGCDMWP94`.
+
 ## Notes
 
 - No Node.js, npm, anilist-cli, or .NET runtime is required for the portable release.
 - The local app does not expose your plaintext token to the browser API.
 - Availability and MAL/Jikan data are cached locally to reduce repeated external requests.
+
+## Development Build Notes
+
+Development requires Node.js/npm for the React UI and the .NET 9 SDK for the native app.
+
+- Run `npm run build` from `web\` for a quick frontend build check.
+- Run `scripts\rebuild-release-test.ps1` to rebuild `release\AniListManagerPortable` for local release testing without creating a ZIP. It preserves `release\AniListManagerPortable\data` and `.runtime`.
+- Run `scripts\build-release.ps1` only when creating a packaged ZIP release.
+- Native AOT publishing requires MSVC `link.exe`. If it is unavailable, the release script falls back to a trimmed self-contained single-file executable.

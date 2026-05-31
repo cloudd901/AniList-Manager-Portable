@@ -1339,10 +1339,17 @@ p {
 
 .list-panel {
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 .entry-row {
+  --entry-row-bg: var(--surface);
+  --entry-row-accent: color-mix(in srgb, var(--accent) 38%, transparent);
+  --entry-row-hover-bg: color-mix(in srgb, var(--surface-hover) 34%, var(--entry-row-bg));
+  --entry-row-stripe-bg: color-mix(in srgb, var(--surface-muted) 46%, var(--surface));
+  --entry-detail-bg: color-mix(in srgb, var(--surface-muted) 58%, transparent);
+  --entry-detail-border: color-mix(in srgb, var(--border-soft) 72%, transparent);
+  --note-control-bg: color-mix(in srgb, var(--surface-muted) 64%, transparent);
   display: grid;
   grid-template-columns: 18px 70px minmax(240px, 1fr) 82px max-content 50px minmax(132px, 170px);
   align-items: center;
@@ -1352,7 +1359,26 @@ p {
   padding: 10px 12px;
   border: 1px solid var(--entry-row-border);
   border-radius: 8px;
-  background: var(--surface);
+  background: var(--entry-row-bg);
+  box-shadow:
+    inset 3px 0 0 var(--entry-row-accent),
+    inset 0 0 var(--badge-highlight),
+    1px 2px color-mix(in srgb, var(--badge-edge-shadow-soft) 76%, transparent),
+    0 3px 8px color-mix(in srgb, var(--badge-depth-shadow) 76%, transparent);
+  transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.entry-row:nth-child(even) {
+  --entry-row-bg: var(--entry-row-stripe-bg);
+}
+
+.entry-row:hover,
+.entry-row:focus-within {
+  box-shadow:
+    inset 3px 0 0 color-mix(in srgb, var(--accent) 58%, transparent),
+    inset 0 0 var(--badge-highlight),
+    1px 2px var(--badge-edge-shadow-soft),
+    0 3px 8px var(--badge-depth-shadow);
 }
 
 .add-search-row {
@@ -1384,6 +1410,7 @@ p {
   border-radius: 6px;
   background: var(--image-fill);
   display: block;
+  box-shadow: 0 2px 7px color-mix(in srgb, var(--shadow) 42%, #00000085);
 }
 
 .cover-thumbnail-public-score {
@@ -1632,14 +1659,11 @@ p {
 .entry-main {
   align-self: stretch;
   display: grid;
-  grid-template-rows: minmax(22px, auto) minmax(18px, auto) 22px;
+  grid-template-rows: minmax(22px, auto) 59px;
   align-content: space-between;
+  gap: 3px;
   min-width: 0;
-  min-height: 68px;
-}
-
-.entry-main.has-airing-row {
-  grid-template-rows: minmax(22px, auto) minmax(18px, auto) minmax(18px, auto) 22px;
+  min-height: 84px;
 }
 
 .title-line {
@@ -1753,7 +1777,7 @@ p {
   justify-self: center;
   display: grid;
   grid-template-rows: repeat(3, 22px);
-  align-content: start;
+  align-content: center;
   justify-items: center;
   gap: 5px;
   width: 82px;
@@ -1838,12 +1862,31 @@ p {
   border: 1px solid var(--focus-line);
 }
 
+.entry-detail-band {
+  display: grid;
+  grid-template-rows: 15px 13px 22px;
+  gap: 2px;
+  min-width: 0;
+  width: 100%;
+  min-height: 59px;
+  padding: 2px 8px;
+  border: 1px solid var(--entry-detail-border);
+  border-radius: 6px;
+  background: var(--entry-detail-bg);
+  overflow: visible;
+}
+
 .subtitle,
 .airing {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 12px;
+  line-height: 1.16;
   overflow-wrap: anywhere;
-  min-height: 18px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .synonym-subtitle {
@@ -1854,7 +1897,15 @@ p {
   width: fit-content;
   max-width: 100%;
   outline: none;
+  overflow: visible;
   z-index: 20;
+}
+
+.synonym-subtitle > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .synonym-info-button {
@@ -1937,8 +1988,8 @@ p {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-  align-self: end;
   min-height: 22px;
+  overflow: visible;
 }
 
 .watch-now-badge,
@@ -2204,6 +2255,10 @@ p {
 
 .note-control {
   width: 100%;
+  padding: 4px;
+  border: 1px solid var(--entry-detail-border);
+  border-radius: 8px;
+  background: var(--note-control-bg);
 }
 
 .note-control textarea {
