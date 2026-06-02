@@ -16,6 +16,22 @@ The release is portable. Unzip it, run `AniListManagerPortable.exe`, and keep th
 
 ![AniList Manager notes view with availability badges](docs/screenshots/01-main-list-overview.png)
 
+### Hidden Right-Click Actions
+
+![AniList Manager list view with hidden right-click action callouts](docs/screenshots/06-hidden-rightclick-options.png)
+
+![AniList Manager right-click menus for filters, title copy actions, and Watch Now server choices](docs/screenshots/07-hidden-rightclick-options-visible.png)
+
+![AniList Manager availability override dialog opened from a right-click availability badge](docs/screenshots/08-hidden-rightclick-options-override.png)
+
+### Simplified View
+
+![AniList Manager simplified Planning list view](docs/screenshots/09-main-simplified.png)
+
+### Advanced Filters
+
+![AniList Manager advanced filters dialog with a saved Missing Score filter](docs/screenshots/10-advanced-filter.png)
+
 ### Add Anime Search
 
 ![AniList Manager add anime search for dragon titles](docs/screenshots/05-add-search-dragon-title-only.png)
@@ -43,20 +59,24 @@ The app stores user data beside the executable. Do not share the `data` folder i
 
 - Browse AniList anime lists by status: Watching, Planning, Completed, Paused, Dropped, and Repeating.
 - Search, filter, and order the active list.
+- Use Advanced Filters for title, notes, availability, progress, score, format, genre, rating, numeric ranges, primary and secondary sort, and saved per-tab filter presets.
+- Use Simplified view to hide secondary row metadata and focus on cover, title, progress, score, notes, and list status.
 - Search AniList from the Add tab, add anime to a chosen list, and optionally filter add-search results by exact title or cached dub availability.
 - Update watched progress, AniList score, and list status.
 - Remove list entries individually or in bulk.
 - Use bulk progress, status, delete, and local note actions for selected rows.
 - Package lists and cover images for Offline Mode, queue list edits while offline, and sync or discard queued edits when returning online.
 - View availability badges with total, subbed, and dubbed episode counts when lookup data is available.
-- Recheck availability for all rows, missing rows, or currently airing rows while reusing permanent high-confidence local cache entries.
+- Recheck availability for all rows, missing rows, or currently airing rows while reusing permanent high-confidence local cache entries, showing progress, and allowing cancellation.
 - Right-click an availability badge to save local availability overrides.
 - Use local notes mode without writing notes to AniList.
 - Open anime detail links through AniList or a configured Watch Now server and open next-episode links when a Watch URL is available.
+- Right-click title and Watch Now controls to copy entry IDs or switch the server used for a single link.
 - Preview a thumbnail cover with the anime synopsis and genres on hover or keyboard focus, or click it to keep one centered preview open.
 - Show metadata pills for year or airing state, AniList format, and MAL content rating when available.
 - Export filtered rows or all lists as a full CSV file or MyAnimeList import XML.
 - Check GitHub releases from About or Settings and open the release ZIP manually when an update is available.
+- Large lists load in chunks and briefly cache recent AniList list reads; the footer shows local, remote, cached, and entry-count diagnostics for the current list load.
 
 ## Tray App
 
@@ -92,7 +112,7 @@ An existing `~\.config\anilist-cli\config.json` token can be imported, but `anil
 
 Portable data is stored beside the executable:
 
-- `data\config.json`: token and general app settings.
+- `data\config.json`: token, Appearance, update, notes-mode, Simplified view, and saved Advanced Filters settings.
 - `data\availability-cache.json`: cached sub/dub availability lookups.
 - `data\availability-overrides.json`: local manual availability overrides.
 - `data\mal-cache.json`: cached MAL/Jikan metadata, totals, and rating labels.
@@ -102,13 +122,25 @@ Portable data is stored beside the executable:
 
 Availability overrides and notes are local to this portable folder. They are not synced to AniList.
 
+## Advanced Filters
+
+Use the sliders button beside the list search box to open Advanced Filters. The dialog can filter by:
+
+- Text across title and notes, title-only text, or notes-only text.
+- Availability completeness, progress completeness, dub availability, unwatched availability alerts, local overrides, notes, and score presence.
+- Format, genre, and MAL/Jikan content rating.
+- Numeric comparisons for year, public score, episode count, progress, sub episodes, and dub episodes.
+- Primary and secondary sort fields with ascending or descending direction.
+
+Saved filters can be loaded later or marked as the default for a status tab. Right-click the sliders button to clear the current filter quickly.
+
 ## Availability And Ratings
 
 Availability counts are best-effort metadata. Provider matches can be incomplete or wrong for specials, split seasons, OVAs, and franchise titles with similar names. Use a local availability override when you have a verified correction.
 
 MAL content rating pills such as `PG-13`, `R`, and `R+` are loaded separately from AniList. Successful rating lookups are reused from `data\mal-cache.json` on later loads instead of periodically refetching the rating. Rating lookup failures do not block list loading.
 
-`Recheck Episodes` refreshes non-permanent entries and skips cached entries marked as permanent high-confidence matches or local overrides. The refresh dialog can target missing entries, airing or dub-behind-sub entries, or the current target set.
+`Recheck Episodes` refreshes non-permanent entries and skips cached entries marked as permanent high-confidence matches or local overrides. The refresh dialog can target missing entries, airing or dub-behind-sub entries, or the current target set. While a refresh is running, the toolbar shows checked/total progress and a stop button can cancel the remaining queue.
 
 ## Watch Now Settings
 
@@ -138,8 +170,11 @@ Use `Export` from the main toolbar to download either the currently filtered row
 - Color mode can be Light, Soft, Dim, Dark, or System.
 - Accent theme can be Blue, Teal, or Rose.
 - Alert icon can be Triangle, Beacon, Bolt, Dot, or Green Dot.
+- Synonym subtitles can be shown or hidden.
 - The synonym info icon can be shown or hidden.
 - Profiles without Appearance settings use Soft + Teal with the Green Dot alert icon until changed.
+
+The main toolbar also includes Simplified view. It hides Watch Now links, metadata pills, and the View Notes toggle, leaving a denser editing layout for progress, score, notes, and list status.
 
 ## Update Checks
 

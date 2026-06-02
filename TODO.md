@@ -1,7 +1,7 @@
 # TODO
 
-## Issues
+# UI Improvements
 
-- Recheck Episodes still slow to load.
-	- Need more transparency to see what's happening.
-	- Need finer progress info.
+- Tagging.
+	 - Add a tagging area below 'Progress, Score, List' area.
+	 - Right click to add new tag with options to create tag and color.

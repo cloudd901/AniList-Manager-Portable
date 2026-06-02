@@ -48,7 +48,28 @@ const SORT_OPTIONS = [
   { value: "notes", label: "Notes" },
   { value: "rating", label: "Class Rating" }
 ];
+const SORT_DIRECTIONS = [
+  { value: "asc", label: "Ascending" },
+  { value: "desc", label: "Descending" }
+];
+const NUMERIC_FILTER_OPERATORS = [
+  { value: ">", label: ">" },
+  { value: ">=", label: ">=" },
+  { value: "<", label: "<" },
+  { value: "<=", label: "<=" },
+  { value: "=", label: "=" }
+];
+const NUMERIC_FILTER_FIELDS = [
+  { value: "year", label: "Year" },
+  { value: "publicScore", label: "Public score" },
+  { value: "episodeCount", label: "Episode count" },
+  { value: "progress", label: "Progress" },
+  { value: "subEpisodes", label: "Sub episodes" },
+  { value: "dubEpisodes", label: "Dub episodes" }
+];
+const ADVANCED_FILTER_VERSION = 1;
 const ADD_SEARCH_LIMIT_OPTIONS = ["all", "200", "100", "50", "20"];
+const LIST_CHUNK_SIZE = 100;
 const AVAILABILITY_CHUNK_SIZE = 25;
 const RATING_CHUNK_SIZE = 4;
 const RATING_BATCH_DELAY_MS = 500;
@@ -93,13 +114,141 @@ const RATING_SORT_RANKS = {
 };
 const AVAILABILITY_ALERT_STATUSES = new Set(["CURRENT", "PLANNING", "PAUSED", "REPEATING"]);
 
+function defaultSortDirection(field) {
+  return field === "english" || field === "romaji" || field === "notes" ? "asc" : "desc";
+}
+
+function defaultNumericFilters() {
+  return Object.fromEntries(NUMERIC_FILTER_FIELDS.map((field) => [field.value, { operator: "", value: "" }]));
+}
+
+function defaultAdvancedFilter() {
+  return {
+    version: ADVANCED_FILTER_VERSION,
+    query: "",
+    title: "",
+    notes: "",
+    completeOnly: false,
+    incompleteOnly: false,
+    dubOnly: false,
+    unwatchedAlertOnly: false,
+    progressCompleteOnly: false,
+    progressIncompleteOnly: false,
+    availabilityOverrideOnly: false,
+    hasNotesOnly: false,
+    hasScoreOnly: false,
+    missingScoreOnly: false,
+    formats: [],
+    genres: [],
+    ratings: [],
+    numeric: defaultNumericFilters(),
+    sort: {
+      primary: "english",
+      primaryDirection: "asc",
+      secondary: "",
+      secondaryDirection: "desc"
+    }
+  };
+}
+
+function normalizeArrayStrings(value, allowedValues = null) {
+  const allowed = allowedValues ? new Set(allowedValues) : null;
+  return [...new Set((Array.isArray(value) ? value : [])
+    .map((item) => String(item || "").trim())
+    .filter((item) => item && (!allowed || allowed.has(item))))];
+}
+
+function normalizeNumericFilters(input) {
+  const normalized = defaultNumericFilters();
+  for (const field of NUMERIC_FILTER_FIELDS) {
+    const source = input?.[field.value] || {};
+    const operator = NUMERIC_FILTER_OPERATORS.some((option) => option.value === source.operator) ? source.operator : "";
+    const value = source.value === 0 || source.value ? String(source.value) : "";
+    normalized[field.value] = { operator, value };
+  }
+  return normalized;
+}
+
+function normalizeAdvancedFilter(filter) {
+  const fallback = defaultAdvancedFilter();
+  const primary = SORT_OPTIONS.some((option) => option.value === filter?.sort?.primary) ? filter.sort.primary : fallback.sort.primary;
+  const secondary = SORT_OPTIONS.some((option) => option.value === filter?.sort?.secondary) ? filter.sort.secondary : "";
+  const primaryDirection = SORT_DIRECTIONS.some((option) => option.value === filter?.sort?.primaryDirection)
+    ? filter.sort.primaryDirection
+    : defaultSortDirection(primary);
+  const secondaryDirection = SORT_DIRECTIONS.some((option) => option.value === filter?.sort?.secondaryDirection)
+    ? filter.sort.secondaryDirection
+    : defaultSortDirection(secondary || "year");
+  const completeOnly = filter?.completeOnly === true;
+  const progressCompleteOnly = filter?.progressCompleteOnly === true;
+  const hasScoreOnly = filter?.hasScoreOnly === true;
+
+  return {
+    ...fallback,
+    query: String(filter?.query || ""),
+    title: String(filter?.title || ""),
+    notes: String(filter?.notes || ""),
+    completeOnly,
+    incompleteOnly: !completeOnly && filter?.incompleteOnly === true,
+    dubOnly: filter?.dubOnly === true,
+    unwatchedAlertOnly: filter?.unwatchedAlertOnly === true,
+    progressCompleteOnly,
+    progressIncompleteOnly: !progressCompleteOnly && filter?.progressIncompleteOnly === true,
+    availabilityOverrideOnly: filter?.availabilityOverrideOnly === true,
+    hasNotesOnly: filter?.hasNotesOnly === true,
+    hasScoreOnly,
+    missingScoreOnly: !hasScoreOnly && filter?.missingScoreOnly === true,
+    formats: normalizeArrayStrings(filter?.formats, Object.keys(FORMAT_LABELS)),
+    genres: normalizeArrayStrings(filter?.genres),
+    ratings: normalizeArrayStrings(filter?.ratings),
+    numeric: normalizeNumericFilters(filter?.numeric),
+    sort: {
+      primary,
+      primaryDirection,
+      secondary: secondary === primary ? "" : secondary,
+      secondaryDirection
+    }
+  };
+}
+
+function normalizeAdvancedFilters(value) {
+  const filters = [];
+  const seenIds = new Set();
+  for (const savedFilter of Array.isArray(value?.filters) ? value.filters : []) {
+    const id = String(savedFilter?.id || "").trim();
+    const name = String(savedFilter?.name || "").trim().slice(0, 80);
+    if (!id || !name || seenIds.has(id)) {
+      continue;
+    }
+    seenIds.add(id);
+    filters.push({
+      id,
+      name,
+      filter: normalizeAdvancedFilter(savedFilter.filter)
+    });
+  }
+
+  const defaultByStatus = {};
+  for (const status of LIST_STATUSES) {
+    const savedId = String(value?.defaultByStatus?.[status.value] || "").trim();
+    if (savedId && seenIds.has(savedId)) {
+      defaultByStatus[status.value] = savedId;
+    }
+  }
+
+  return { filters, defaultByStatus };
+}
+
 function defaultSettings() {
   return {
     showNotes: false,
+    simplifiedView: false,
+    advancedFilters: normalizeAdvancedFilters(),
     appearance: {
       colorMode: "soft",
       accentTheme: "teal",
       alertIcon: "green-dot",
+      showSynonymSubtitle: true,
       showSynonymInfoIcon: true
     },
     watchNow: {
@@ -122,10 +271,15 @@ function normalizeSettings(settings) {
   const updates = settings?.updates || {};
   return {
     showNotes: settings?.showNotes === true,
+    simplifiedView: settings?.simplifiedView === true,
+    advancedFilters: normalizeAdvancedFilters(settings?.advancedFilters),
     appearance: {
       colorMode: COLOR_MODES.some((mode) => mode.value === appearance.colorMode) ? appearance.colorMode : "soft",
       accentTheme: ACCENT_THEMES.some((theme) => theme.value === appearance.accentTheme) ? appearance.accentTheme : "teal",
       alertIcon: ALERT_ICON_OPTIONS.some((option) => option.value === appearance.alertIcon) ? appearance.alertIcon : "green-dot",
+      showSynonymSubtitle: appearance.showSynonymSubtitle === undefined
+        ? appearance.hideSynonymSubtitle !== true
+        : appearance.showSynonymSubtitle !== false,
       showSynonymInfoIcon: appearance.showSynonymInfoIcon !== false
     },
     watchNow: {
@@ -779,9 +933,58 @@ async function api(path, options = {}, retrySession = true) {
       apiSessionPromise = null;
       return api(path, options, false);
     }
-    throw new Error(payload.error || `Request failed: ${response.status}`);
+    const error = new Error(payload.error || `Request failed: ${response.status}`);
+    error.details = payload.details || null;
+    error.status = response.status;
+    throw error;
   }
   return payload;
+}
+
+function formatLoadDiagnostics(diagnostics) {
+  if (!diagnostics) {
+    return "";
+  }
+  const localMs = Number(diagnostics.localApiMs);
+  const remoteMs = Number(diagnostics.remoteMs);
+  const entryCount = Number(diagnostics.entryCount);
+  const source = diagnostics.source === "local-offline" ? "Local" : "AniList";
+  const parts = [];
+  if (diagnostics.cacheHit === true) {
+    parts.push("cached");
+  }
+  if (Number.isFinite(localMs)) {
+    parts.push(`local ${(localMs / 1000).toFixed(1)}s`);
+  }
+  if (Number.isFinite(remoteMs) && diagnostics.cacheHit !== true) {
+    parts.push(`remote ${(remoteMs / 1000).toFixed(1)}s`);
+  }
+  if (Number.isFinite(entryCount)) {
+    parts.push(`${entryCount} entries`);
+  }
+  return parts.length > 0 ? `${source}: ${parts.join(" / ")}` : "";
+}
+
+function combineChunkDiagnostics(chunks, entryCount) {
+  const last = chunks[chunks.length - 1]?.diagnostics || {};
+  const cacheHit = chunks.length > 0 && chunks.every((chunk) => chunk.diagnostics?.cacheHit === true);
+  return {
+    ...last,
+    cacheHit,
+    entryCount,
+    chunkCount: chunks.length,
+    localApiMs: chunks.reduce((total, chunk) => total + (Number(chunk.diagnostics?.localApiMs) || 0), 0),
+    remoteMs: chunks.reduce((total, chunk) => total + (Number(chunk.diagnostics?.remoteMs) || 0), 0),
+    hasNextChunk: false
+  };
+}
+
+function mergeUniqueEntries(existingEntries, nextEntries) {
+  const byMediaId = new Map(existingEntries.map((entry) => [entry.mediaId, entry]));
+  for (const entry of nextEntries || []) {
+    byMediaId.set(entry.mediaId, entry);
+  }
+  return Array.from(byMediaId.values());
 }
 
 function availabilityRequestEntries(entries) {
@@ -1019,6 +1222,28 @@ function NoteControl({ entry, onUpdate, onError }) {
   );
 }
 
+function ListStatusControl({ entry, activeStatus, moving, deleting, onMove }) {
+  return (
+    <label className="row-control list-control">
+      <span>List</span>
+      <select
+        className="status-select"
+        value={activeStatus}
+        disabled={moving || deleting}
+        onChange={(event) => onMove(event.target.value)}
+        aria-label={`Move ${entry.title}`}
+      >
+        {LIST_STATUSES.map((status) => (
+          <option value={status.value} key={status.value}>
+            {status.label}
+          </option>
+        ))}
+        <option value="__REMOVE__">Remove from list</option>
+      </select>
+    </label>
+  );
+}
+
 function isAvailabilityIncomplete(availability) {
   if (!availability || availability.status !== "found" || !availability.totalEpisodes) {
     return false;
@@ -1052,6 +1277,28 @@ function isPermanentAvailability(availability) {
   return availability.matchConfidence === "high" || availability.source === "local-override" || availability.override === true;
 }
 
+function isLocalAvailabilityOverride(availability) {
+  return availability?.source === "local-override"
+    || availability?.override === true
+    || availability?.totalSource === "override"
+    || availability?.forceAiring === true;
+}
+
+function hasFinalizedAvailabilityTotalMismatch(entry, availability) {
+  if (!entry || !availability || availability.status !== "found" || availability.cachePermanent !== true) {
+    return false;
+  }
+  const isAiring = entry.isAiring || availability.forceAiring === true;
+  const availabilityTotal = Number(availability.totalEpisodes);
+  const anilistTotal = Number(entry.totalEpisodes);
+  return !isAiring
+    && Number.isFinite(availabilityTotal)
+    && Number.isFinite(anilistTotal)
+    && availabilityTotal > 0
+    && anilistTotal > 0
+    && availabilityTotal !== anilistTotal;
+}
+
 function isAvailabilityMissing(availability) {
   return (
     !availability ||
@@ -1077,6 +1324,262 @@ function entryYear(entry) {
     return new Date().getFullYear();
   }
   return Number(entry.seasonYear || entry.endDate?.year) || null;
+}
+
+function knownEpisodeTotal(entry, availability) {
+  const availabilityTotal = Number(availability?.totalEpisodes);
+  if (Number.isFinite(availabilityTotal) && availabilityTotal > 0) {
+    return availabilityTotal;
+  }
+  const entryTotal = Number(entry?.totalEpisodes);
+  return Number.isFinite(entryTotal) && entryTotal > 0 ? entryTotal : null;
+}
+
+function numericFilterValue(field, entry, availability) {
+  if (field === "year") {
+    return entryYear(entry);
+  }
+  if (field === "publicScore") {
+    const score = Number(entry.publicScore);
+    return Number.isFinite(score) && score > 0 ? score / 10 : null;
+  }
+  if (field === "episodeCount") {
+    return knownEpisodeTotal(entry, availability);
+  }
+  if (field === "progress") {
+    const progress = Number(entry.progress);
+    return Number.isFinite(progress) ? progress : null;
+  }
+  if (field === "subEpisodes") {
+    const subEpisodes = Number(availability?.subEpisodes);
+    return Number.isFinite(subEpisodes) ? subEpisodes : null;
+  }
+  if (field === "dubEpisodes") {
+    const dubEpisodes = Number(availability?.dubEpisodes);
+    return Number.isFinite(dubEpisodes) ? dubEpisodes : null;
+  }
+  return null;
+}
+
+function matchesNumericFilter(value, filter) {
+  const target = Number(filter?.value);
+  if (!filter?.operator || !Number.isFinite(target)) {
+    return true;
+  }
+  if (!Number.isFinite(value)) {
+    return false;
+  }
+  if (filter.operator === ">") {
+    return value > target;
+  }
+  if (filter.operator === ">=") {
+    return value >= target;
+  }
+  if (filter.operator === "<") {
+    return value < target;
+  }
+  if (filter.operator === "<=") {
+    return value <= target;
+  }
+  return value === target;
+}
+
+function entryMatchesAdvancedFilter(entry, context) {
+  const filter = normalizeAdvancedFilter(context.filter);
+  const availability = context.availability?.[entry.mediaId] || {};
+  const normalizedQuery = filter.query.trim().toLowerCase();
+  const normalizedTitle = filter.title.trim().toLowerCase();
+  const normalizedNotes = filter.notes.trim().toLowerCase();
+  const notes = String(entry.notes || "");
+  const titles = [entry.title, entry.romajiTitle, entry.englishTitle, entry.nativeTitle].filter(Boolean).map((value) => String(value).toLowerCase());
+
+  const matchesQuery = !normalizedQuery || [...titles, notes.toLowerCase()].some((value) => value.includes(normalizedQuery));
+  const matchesTitle = !normalizedTitle || titles.some((value) => value.includes(normalizedTitle));
+  const matchesNotes = !normalizedNotes || notes.toLowerCase().includes(normalizedNotes);
+  const matchesComplete = !filter.completeOnly || isAvailabilityComplete(availability);
+  const matchesIncomplete = !filter.incompleteOnly || isAvailabilityIncomplete(availability);
+  const matchesDub = !filter.dubOnly || Number(availability.dubEpisodes || 0) > 0;
+  const matchesUnwatchedAlert = !filter.unwatchedAlertOnly || Boolean(availabilityAlertState(entry, availability, context.activeStatus, context.watchNow).label);
+  const totalEpisodes = knownEpisodeTotal(entry, availability);
+  const matchesProgressComplete = !filter.progressCompleteOnly || (Number.isFinite(totalEpisodes) && totalEpisodes > 0 && Number(entry.progress) >= totalEpisodes);
+  const matchesProgressIncomplete = !filter.progressIncompleteOnly || (Number.isFinite(totalEpisodes) && totalEpisodes > 0 && Number(entry.progress) < totalEpisodes);
+  const matchesOverride = !filter.availabilityOverrideOnly || isLocalAvailabilityOverride(availability);
+  const matchesHasNotes = !filter.hasNotesOnly || notes.trim().length > 0;
+  const personalScore = Number(entry.score);
+  const hasPersonalScore = Number.isFinite(personalScore) && personalScore > 0;
+  const matchesHasScore = !filter.hasScoreOnly || hasPersonalScore;
+  const matchesMissingScore = !filter.missingScoreOnly || !hasPersonalScore;
+  const matchesFormat = filter.formats.length === 0 || filter.formats.includes(entry.format);
+  const entryGenres = new Set((entry.genres || []).map((genre) => String(genre)));
+  const matchesGenres = filter.genres.length === 0 || filter.genres.every((genre) => entryGenres.has(genre));
+  const ratingLabel = String(context.ratings?.[entry.mediaId]?.ratingLabel || "").trim();
+  const matchesRatings = filter.ratings.length === 0 || filter.ratings.includes(ratingLabel);
+  const matchesNumeric = NUMERIC_FILTER_FIELDS.every((field) => matchesNumericFilter(numericFilterValue(field.value, entry, availability), filter.numeric[field.value]));
+
+  return matchesQuery
+    && matchesTitle
+    && matchesNotes
+    && matchesComplete
+    && matchesIncomplete
+    && matchesDub
+    && matchesUnwatchedAlert
+    && matchesProgressComplete
+    && matchesProgressIncomplete
+    && matchesOverride
+    && matchesHasNotes
+    && matchesHasScore
+    && matchesMissingScore
+    && matchesFormat
+    && matchesGenres
+    && matchesRatings
+    && matchesNumeric;
+}
+
+function compareTextValues(a, b, direction) {
+  const valueA = String(a || "").trim();
+  const valueB = String(b || "").trim();
+  if (!valueA && !valueB) {
+    return 0;
+  }
+  if (!valueA) {
+    return 1;
+  }
+  if (!valueB) {
+    return -1;
+  }
+  const compared = valueA.localeCompare(valueB, undefined, { sensitivity: "base" });
+  return direction === "desc" ? -compared : compared;
+}
+
+function compareNumberValues(a, b, direction) {
+  const validA = Number.isFinite(a);
+  const validB = Number.isFinite(b);
+  if (!validA && !validB) {
+    return 0;
+  }
+  if (!validA) {
+    return 1;
+  }
+  if (!validB) {
+    return -1;
+  }
+  return direction === "asc" ? a - b : b - a;
+}
+
+function compareEntriesBySortField(a, b, field, direction, context) {
+  const availabilityA = context.availability?.[a.mediaId] || {};
+  const availabilityB = context.availability?.[b.mediaId] || {};
+  if (field === "english") {
+    return compareTextValues(a.title, b.title, direction);
+  }
+  if (field === "romaji") {
+    return compareTextValues(a.romajiTitle || a.title, b.romajiTitle || b.title, direction);
+  }
+  if (field === "notes") {
+    return compareTextValues(a.notes, b.notes, direction);
+  }
+  if (field === "personalScore") {
+    const scoreA = Number(a.score) || null;
+    const scoreB = Number(b.score) || null;
+    return compareNumberValues(scoreA && scoreA > 0 ? scoreA : null, scoreB && scoreB > 0 ? scoreB : null, direction);
+  }
+  if (field === "rating") {
+    const ratingA = RATING_SORT_RANKS[context.ratings?.[a.mediaId]?.ratingLabel || ""] || null;
+    const ratingB = RATING_SORT_RANKS[context.ratings?.[b.mediaId]?.ratingLabel || ""] || null;
+    return compareNumberValues(ratingA, ratingB, direction);
+  }
+  if (field === "total") {
+    return compareNumberValues(knownEpisodeTotal(a, availabilityA), knownEpisodeTotal(b, availabilityB), direction);
+  }
+  if (field === "sub") {
+    return compareNumberValues(Number(availabilityA.subEpisodes), Number(availabilityB.subEpisodes), direction);
+  }
+  if (field === "dub") {
+    return compareNumberValues(Number(availabilityA.dubEpisodes), Number(availabilityB.dubEpisodes), direction);
+  }
+  if (field === "publicScore") {
+    const scoreA = Number(a.publicScore) || null;
+    const scoreB = Number(b.publicScore) || null;
+    return compareNumberValues(scoreA && scoreA > 0 ? scoreA : null, scoreB && scoreB > 0 ? scoreB : null, direction);
+  }
+  if (field === "progress") {
+    return compareNumberValues(Number(a.progress), Number(b.progress), direction);
+  }
+  if (field === "year") {
+    return compareNumberValues(entryYear(a), entryYear(b), direction);
+  }
+  return compareTextValues(a.title, b.title, direction);
+}
+
+function compareEntriesByAdvancedSort(a, b, context) {
+  const sort = normalizeAdvancedFilter(context.filter).sort;
+  const primary = compareEntriesBySortField(a, b, sort.primary, sort.primaryDirection, context);
+  if (primary !== 0) {
+    return primary;
+  }
+  if (sort.secondary) {
+    const secondary = compareEntriesBySortField(a, b, sort.secondary, sort.secondaryDirection, context);
+    if (secondary !== 0) {
+      return secondary;
+    }
+  }
+  return compareTextValues(a.title, b.title, "asc");
+}
+
+function compareAddSearchEntries(a, b, sortOrder) {
+  const field = SORT_OPTIONS.some((option) => option.value === sortOrder) ? sortOrder : "english";
+  return compareEntriesByAdvancedSort(a, b, {
+    filter: {
+      sort: {
+        primary: field,
+        primaryDirection: defaultSortDirection(field),
+        secondary: "",
+        secondaryDirection: "desc"
+      }
+    },
+    availability: {},
+    ratings: {}
+  });
+}
+
+function availableGenreOptions(entries) {
+  return [...new Set(entries.flatMap((entry) => entry.genres || []).map((genre) => String(genre)).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+}
+
+function availableRatingOptions(entries, ratings) {
+  return [...new Set(entries.map((entry) => ratings?.[entry.mediaId]?.ratingLabel).map((rating) => String(rating || "").trim()).filter(Boolean))]
+    .sort((a, b) => {
+      const rankA = RATING_SORT_RANKS[a] || 0;
+      const rankB = RATING_SORT_RANKS[b] || 0;
+      return rankB - rankA || a.localeCompare(b, undefined, { sensitivity: "base" });
+    });
+}
+
+function advancedFilterHasActiveCriteria(filter) {
+  const normalized = normalizeAdvancedFilter(filter);
+  return Boolean(
+    normalized.query.trim()
+    || normalized.title.trim()
+    || normalized.notes.trim()
+    || normalized.completeOnly
+    || normalized.incompleteOnly
+    || normalized.dubOnly
+    || normalized.unwatchedAlertOnly
+    || normalized.progressCompleteOnly
+    || normalized.progressIncompleteOnly
+    || normalized.availabilityOverrideOnly
+    || normalized.hasNotesOnly
+    || normalized.hasScoreOnly
+    || normalized.missingScoreOnly
+    || normalized.formats.length > 0
+    || normalized.genres.length > 0
+    || normalized.ratings.length > 0
+    || NUMERIC_FILTER_FIELDS.some((field) => normalized.numeric[field.value].operator && normalized.numeric[field.value].value !== "")
+    || normalized.sort.primary !== "english"
+    || normalized.sort.primaryDirection !== "asc"
+    || normalized.sort.secondary
+  );
 }
 
 function selectedWatchNowServer(watchNow) {
@@ -1295,29 +1798,33 @@ function AvailabilityBadge({ entry, availability, activeStatus, watchNow, alertI
   const forceAiring = availability.forceAiring === true;
   const hasCountOverride = availability.source === "local-override" || availability.totalSource === "override";
   const isAiring = entry.isAiring || forceAiring;
+  const hasFinalizedTotalMismatch = hasFinalizedAvailabilityTotalMismatch(entry, availability);
   const hasDub = Number(availability.dubEpisodes) > 0;
   const alertLabel = availabilityAlertState(entry, availability, activeStatus, watchNow).label;
   const subComplete = Number(availability.subEpisodes) >= Number(availability.totalEpisodes);
   const dubComplete = hasDub && Number(availability.dubEpisodes) >= Number(availability.totalEpisodes);
   const title = forceComplete
     ? "Completed"
-    : isAiring && dubComplete
-      ? "airing and dub complete"
-      : isAiring
-        ? "still airing"
-        : hasDub && Number(availability.dubEpisodes) < Number(availability.totalEpisodes)
-          ? "dub not complete"
-          : subComplete && dubComplete
-            ? "sub and dub complete"
-            : subComplete && !hasDub
-              ? "sub complete"
-              : availability.matchedTitle || "";
+    : hasFinalizedTotalMismatch
+      ? "MAL/Jikan discrepancy with AniList. Right-click to override."
+      : isAiring && dubComplete
+        ? "airing and dub complete"
+        : isAiring
+          ? "still airing"
+          : hasDub && Number(availability.dubEpisodes) < Number(availability.totalEpisodes)
+            ? "dub not complete"
+            : subComplete && dubComplete
+              ? "sub and dub complete"
+              : subComplete && !hasDub
+                ? "sub complete"
+                : availability.matchedTitle || "";
   return (
     <span className="availability-badge-wrap">
       <span
         className={[
           "availability-badge",
           !forceComplete && (incomplete || isAiring) ? "incomplete" : "",
+          hasFinalizedTotalMismatch ? "total-mismatch" : "",
           hasCountOverride ? "override" : ""
         ].filter(Boolean).join(" ")}
         title={title}
@@ -1656,7 +2163,7 @@ function RowTitleMenu({ menu, onClose }) {
       aria-label={`Copy details for ${menu.entry.title}`}
     >
       <button type="button" role="menuitem" onClick={() => copyValue(menu.entry.title)}>
-        Copy name
+        Copy Name
       </button>
       <button type="button" role="menuitem" onClick={() => copyValue(menu.entry.mediaId)}>
         Copy AniList ID
@@ -1723,6 +2230,50 @@ function WatchServerMenu({ menu, onClose }) {
           {option.active ? <small>Active</small> : null}
         </button>
       ))}
+    </div>
+  );
+}
+
+function AdvancedFilterMenu({ menu, onClose, onClear }) {
+  useEffect(() => {
+    if (!menu) {
+      return undefined;
+    }
+    function closeOnKey(event) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+    window.addEventListener("click", onClose);
+    window.addEventListener("scroll", onClose, true);
+    window.addEventListener("keydown", closeOnKey);
+    return () => {
+      window.removeEventListener("click", onClose);
+      window.removeEventListener("scroll", onClose, true);
+      window.removeEventListener("keydown", closeOnKey);
+    };
+  }, [menu, onClose]);
+
+  if (!menu) {
+    return null;
+  }
+
+  function clearFilter() {
+    onClear();
+    onClose();
+  }
+
+  return (
+    <div
+      className="row-title-menu"
+      style={{ left: menu.x, top: menu.y }}
+      onClick={(event) => event.stopPropagation()}
+      role="menu"
+      aria-label="Advanced filter actions"
+    >
+      <button type="button" role="menuitem" onClick={clearFilter}>
+        Clear Filter
+      </button>
     </div>
   );
 }
@@ -1840,15 +2391,18 @@ function entrySubtitleDetails(entry) {
 
   return {
     subtitle: showRomajiSubtitle ? romajiTitle : showSynonymSubtitle ? synonyms[0] : "",
+    subtitleSource: showRomajiSubtitle ? "romaji" : showSynonymSubtitle ? "synonym" : "",
     synonyms
   };
 }
 
-function EntrySubtitle({ entry, showSynonymInfoIcon }) {
+function EntrySubtitle({ entry, showSynonymSubtitle, showSynonymInfoIcon }) {
   const [tooltipOpen, setTooltipOpen] = useState(false);
   const subtitleRef = useRef(null);
   const { subtitle, synonyms } = entrySubtitleDetails(entry);
-  const showTooltip = Boolean(showSynonymInfoIcon && subtitle && synonyms.length > 0);
+  const hasSynonymSubtitle = Boolean(subtitle && synonyms.length > 0);
+  const visibleSubtitle = !showSynonymSubtitle && hasSynonymSubtitle ? "" : subtitle;
+  const showTooltip = Boolean(showSynonymInfoIcon && visibleSubtitle && synonyms.length > 0);
 
   useEffect(() => {
     if (!tooltipOpen) {
@@ -1865,9 +2419,13 @@ function EntrySubtitle({ entry, showSynonymInfoIcon }) {
     return () => document.removeEventListener("pointerdown", closeOnOutsideClick);
   }, [tooltipOpen]);
 
+  if (!showSynonymSubtitle && hasSynonymSubtitle) {
+    return null;
+  }
+
   return (
     <div ref={subtitleRef} className={showTooltip && tooltipOpen ? "subtitle synonym-subtitle open" : showTooltip ? "subtitle synonym-subtitle" : "subtitle"}>
-      <span>{subtitle}</span>
+      <span>{visibleSubtitle}</span>
       {showTooltip ? (
         <>
           <button
@@ -1898,7 +2456,15 @@ function EntrySubtitle({ entry, showSynonymInfoIcon }) {
   );
 }
 
-function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activeStatus, availability, rating, watchNow, alertIconId, showSynonymInfoIcon, onRefreshNeeded, onAvailabilityOverride, onPreviewFocus, previewFocused, showNotes, onNoteError, offlineMode, onOpenWatchServerMenu }) {
+function hasHiddenSynonymSubtitle(entry, showSynonymSubtitle) {
+  if (showSynonymSubtitle) {
+    return false;
+  }
+  const { subtitle, synonyms } = entrySubtitleDetails(entry);
+  return Boolean(subtitle && synonyms.length > 0);
+}
+
+function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activeStatus, availability, rating, watchNow, alertIconId, showSynonymSubtitle, showSynonymInfoIcon, onRefreshNeeded, onAvailabilityOverride, onPreviewFocus, previewFocused, showNotes, simplifiedView, onNoteError, offlineMode, onOpenWatchServerMenu }) {
   const [moving, setMoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [titleMenu, setTitleMenu] = useState(null);
@@ -1974,7 +2540,7 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
   }
 
   return (
-    <article className="entry-row">
+    <article className={simplifiedView ? "entry-row simplified-entry-row" : "entry-row"}>
       <label className="select-cell">
         <input
           type="checkbox"
@@ -2012,95 +2578,88 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
           )}
           <RowTitleMenu menu={titleMenu} onClose={() => setTitleMenu(null)} />
         </div>
-        <div className="entry-detail-band">
-          <EntrySubtitle entry={entry} showSynonymInfoIcon={showSynonymInfoIcon} />
-          <div className="airing">{entry.nextAiringEpisode ? formatAiring(entry.nextAiringEpisode) : ""}</div>
-          <div className="availability-line">
-            {offlineMode ? (
-            <span className="watch-now-badge disabled-link-badge">
-              Details
-            </span>
-            ) : (
-            <a
-              href={detailsLink || entry.siteUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="watch-now-badge"
-              onContextMenu={openDetailsServerMenu}
-            >
-              Details
-            </a>
-            )}
-            {episodeLink && !offlineMode ? (
+        {!simplifiedView ? (
+          <div className={hasHiddenSynonymSubtitle(entry, showSynonymSubtitle) ? "entry-detail-band subtitle-hidden" : "entry-detail-band"}>
+            <EntrySubtitle entry={entry} showSynonymSubtitle={showSynonymSubtitle} showSynonymInfoIcon={showSynonymInfoIcon} />
+            <div className="airing">{entry.nextAiringEpisode ? formatAiring(entry.nextAiringEpisode) : ""}</div>
+            <div className="availability-line">
+              {offlineMode ? (
+              <span className="watch-now-badge disabled-link-badge">
+                Details
+              </span>
+              ) : (
               <a
-                href={episodeLink}
+                href={detailsLink || entry.siteUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="next-episode-badge"
-                onContextMenu={openEpisodeServerMenu}
+                className="watch-now-badge"
+                onContextMenu={openDetailsServerMenu}
               >
-                {activeStatus === "CURRENT" ? "Next Episode" : "Watch Now"}
+                Details
               </a>
-            ) : null}
-            <AvailabilityBadge entry={entry} availability={availability} activeStatus={activeStatus} watchNow={watchNow} alertIconId={alertIconId} onEdit={onAvailabilityOverride} />
+              )}
+              {episodeLink && !offlineMode ? (
+                <a
+                  href={episodeLink}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="next-episode-badge"
+                  onContextMenu={openEpisodeServerMenu}
+                >
+                  {activeStatus === "CURRENT" ? "Next Episode" : "Watch Now"}
+                </a>
+              ) : null}
+              <AvailabilityBadge entry={entry} availability={availability} activeStatus={activeStatus} watchNow={watchNow} alertIconId={alertIconId} onEdit={onAvailabilityOverride} />
+            </div>
           </div>
+        ) : null}
+      </div>
+      {!simplifiedView ? (
+        <div className="meta-pill-stack" aria-label="Anime metadata">
+          <span className="meta-pill-slot">
+            {metaIsAiring ? (
+              <span className={forcedMetaAiring ? "airing-tag override" : "airing-tag"}>Airing</span>
+            ) : isUnreleased(entry) ? (
+              <span className="unreleased-tag">Unreleased</span>
+            ) : year ? (
+              <span className="year-tag">{year}</span>
+            ) : null}
+          </span>
+          <span className="meta-pill-slot">
+            {mediaFormat ? <span className="format-tag">{mediaFormat}</span> : null}
+          </span>
+          <span className="meta-pill-slot">
+            {rating?.ratingLabel ? (
+              <span className={`rating-tag ${ratingClass(rating.ratingLabel)}`} title={rating.rating || "MAL rating"}>{rating.ratingLabel}</span>
+            ) : entry.isAdult ? (
+              <span className="adult-tag">18+</span>
+            ) : null}
+          </span>
         </div>
-      </div>
-      <div className="meta-pill-stack" aria-label="Anime metadata">
-        <span className="meta-pill-slot">
-          {metaIsAiring ? (
-            <span className={forcedMetaAiring ? "airing-tag override" : "airing-tag"}>Airing</span>
-          ) : isUnreleased(entry) ? (
-            <span className="unreleased-tag">Unreleased</span>
-          ) : year ? (
-            <span className="year-tag">{year}</span>
-          ) : null}
-        </span>
-        <span className="meta-pill-slot">
-          {mediaFormat ? <span className="format-tag">{mediaFormat}</span> : null}
-        </span>
-        <span className="meta-pill-slot">
-          {rating?.ratingLabel ? (
-            <span className={`rating-tag ${ratingClass(rating.ratingLabel)}`} title={rating.rating || "MAL rating"}>{rating.ratingLabel}</span>
-          ) : entry.isAdult ? (
-            <span className="adult-tag">18+</span>
-          ) : null}
-        </span>
-      </div>
+      ) : null}
       <ProgressControl
         entry={entry}
         onUpdate={onUpdate}
         onRefreshNeeded={onRefreshNeeded}
-          shouldRefreshAtTotal={activeStatus !== "COMPLETED"}
-          offlineMode={offlineMode}
-        />
+        shouldRefreshAtTotal={activeStatus !== "COMPLETED" && !simplifiedView}
+        offlineMode={offlineMode}
+      />
       <ScoreControl entry={entry} onUpdate={onUpdate} />
-      {showNotes ? (
+      {simplifiedView ? (
+        <>
+          <NoteControl entry={entry} onUpdate={onUpdate} onError={onNoteError} />
+          <ListStatusControl entry={entry} activeStatus={activeStatus} moving={moving} deleting={deleting} onMove={moveTo} />
+        </>
+      ) : showNotes ? (
         <NoteControl entry={entry} onUpdate={onUpdate} onError={onNoteError} />
       ) : (
-        <label className="row-control list-control">
-          <span>List</span>
-          <select
-            className="status-select"
-            value={activeStatus}
-            disabled={moving || deleting}
-            onChange={(event) => moveTo(event.target.value)}
-            aria-label={`Move ${entry.title}`}
-          >
-            {LIST_STATUSES.map((status) => (
-              <option value={status.value} key={status.value}>
-                {status.label}
-              </option>
-            ))}
-            <option value="__REMOVE__">Remove from list</option>
-          </select>
-        </label>
+        <ListStatusControl entry={entry} activeStatus={activeStatus} moving={moving} deleting={deleting} onMove={moveTo} />
       )}
     </article>
   );
 }
 
-function AddSearchResultRow({ entry, availability, watchNow, alertIconId, showSynonymInfoIcon, onAdded, onPreviewFocus, previewFocused, offlineMode, onOpenWatchServerMenu }) {
+function AddSearchResultRow({ entry, availability, watchNow, alertIconId, showSynonymSubtitle, showSynonymInfoIcon, onAdded, onPreviewFocus, previewFocused, offlineMode, onOpenWatchServerMenu }) {
   const [targetStatus, setTargetStatus] = useState("PLANNING");
   const [adding, setAdding] = useState(false);
   const year = entryYear(entry);
@@ -2163,8 +2722,8 @@ function AddSearchResultRow({ entry, availability, watchNow, alertIconId, showSy
           </a>
           )}
         </div>
-        <div className="entry-detail-band">
-          <EntrySubtitle entry={entry} showSynonymInfoIcon={showSynonymInfoIcon} />
+        <div className={hasHiddenSynonymSubtitle(entry, showSynonymSubtitle) ? "entry-detail-band subtitle-hidden" : "entry-detail-band"}>
+          <EntrySubtitle entry={entry} showSynonymSubtitle={showSynonymSubtitle} showSynonymInfoIcon={showSynonymInfoIcon} />
           <div className="airing">{entry.nextAiringEpisode ? formatAiring(entry.nextAiringEpisode) : ""}</div>
           <div className="availability-line">
             {offlineMode ? (
@@ -2287,6 +2846,410 @@ function BulkMoveBar({ entries, selectedIds, activeStatus, onMoved, onClear }) {
         Clear
       </button>
     </section>
+  );
+}
+
+function AdvancedFilterDialog({ open, activeStatus, filter, advancedFilters, genreOptions, ratingOptions, alertsFilterEnabled, onClose, onApply, onSaveAdvancedFilters }) {
+  const [draft, setDraft] = useState(() => normalizeAdvancedFilter(filter));
+  const [saveName, setSaveName] = useState("");
+  const [saveAsDefault, setSaveAsDefault] = useState(false);
+  const [selectedSavedId, setSelectedSavedId] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const savedFilters = advancedFilters?.filters || [];
+  const defaultSavedId = advancedFilters?.defaultByStatus?.[activeStatus] || "";
+
+  useEffect(() => {
+    if (open) {
+      setDraft(normalizeAdvancedFilter(filter));
+      setSaveName("");
+      setSaveAsDefault(false);
+      setSelectedSavedId(defaultSavedId || "");
+      setMessage("");
+      setError("");
+    }
+  }, [open, filter, defaultSavedId]);
+
+  if (!open) {
+    return null;
+  }
+
+  function updateDraft(updater) {
+    setDraft((current) => normalizeAdvancedFilter(typeof updater === "function" ? updater(current) : { ...current, ...updater }));
+  }
+
+  function updateBoolean(name, checked) {
+    updateDraft((current) => ({
+      ...current,
+      completeOnly: name === "incompleteOnly" && checked ? false : current.completeOnly,
+      incompleteOnly: name === "completeOnly" && checked ? false : current.incompleteOnly,
+      progressCompleteOnly: name === "progressIncompleteOnly" && checked ? false : current.progressCompleteOnly,
+      progressIncompleteOnly: name === "progressCompleteOnly" && checked ? false : current.progressIncompleteOnly,
+      hasScoreOnly: name === "missingScoreOnly" && checked ? false : current.hasScoreOnly,
+      missingScoreOnly: name === "hasScoreOnly" && checked ? false : current.missingScoreOnly,
+      [name]: checked
+    }));
+  }
+
+  function toggleListValue(name, value, checked) {
+    updateDraft((current) => {
+      const values = new Set(current[name] || []);
+      if (checked) {
+        values.add(value);
+      } else {
+        values.delete(value);
+      }
+      return { ...current, [name]: [...values] };
+    });
+  }
+
+  function updateNumeric(field, patch) {
+    updateDraft((current) => ({
+      ...current,
+      numeric: {
+        ...current.numeric,
+        [field]: {
+          ...current.numeric[field],
+          ...patch
+        }
+      }
+    }));
+  }
+
+  async function persistAdvancedFilters(nextAdvancedFilters, successMessage) {
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      await onSaveAdvancedFilters(nextAdvancedFilters);
+      setMessage(successMessage);
+    } catch (saveError) {
+      setError(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveCurrentFilter() {
+    const name = saveName.trim();
+    if (!name) {
+      setError("Enter a saved filter name.");
+      return;
+    }
+
+    const existing = savedFilters.find((savedFilter) => savedFilter.name.toLowerCase() === name.toLowerCase());
+    if (existing && !window.confirm(`Overwrite saved filter "${existing.name}"?`)) {
+      return;
+    }
+
+    const id = existing?.id || `filter-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const savedFilter = { id, name, filter: normalizeAdvancedFilter(draft) };
+    const nextFilters = existing
+      ? savedFilters.map((item) => item.id === existing.id ? savedFilter : item)
+      : [...savedFilters, savedFilter];
+    const defaultByStatus = { ...(advancedFilters?.defaultByStatus || {}) };
+    if (saveAsDefault) {
+      defaultByStatus[activeStatus] = id;
+    }
+
+    setSelectedSavedId(id);
+    await persistAdvancedFilters({ filters: nextFilters, defaultByStatus }, saveAsDefault ? "Saved and set as default." : "Saved filter.");
+  }
+
+  function loadSavedFilter() {
+    const savedFilter = savedFilters.find((item) => item.id === selectedSavedId);
+    if (!savedFilter) {
+      return;
+    }
+    setDraft(normalizeAdvancedFilter(savedFilter.filter));
+    setSaveName(savedFilter.name);
+    setMessage(`Loaded "${savedFilter.name}".`);
+    setError("");
+  }
+
+  async function deleteSavedFilter() {
+    const savedFilter = savedFilters.find((item) => item.id === selectedSavedId);
+    if (!savedFilter || !window.confirm(`Delete saved filter "${savedFilter.name}"?`)) {
+      return;
+    }
+    const nextFilters = savedFilters.filter((item) => item.id !== savedFilter.id);
+    const defaultByStatus = Object.fromEntries(Object.entries(advancedFilters?.defaultByStatus || {}).filter(([, id]) => id !== savedFilter.id));
+    setSelectedSavedId("");
+    await persistAdvancedFilters({ filters: nextFilters, defaultByStatus }, "Deleted saved filter.");
+  }
+
+  async function setSelectedAsDefault() {
+    const savedFilter = savedFilters.find((item) => item.id === selectedSavedId);
+    if (!savedFilter) {
+      setError("Choose a saved filter first.");
+      return;
+    }
+    await persistAdvancedFilters({
+      filters: savedFilters,
+      defaultByStatus: {
+        ...(advancedFilters?.defaultByStatus || {}),
+        [activeStatus]: savedFilter.id
+      }
+    }, `Default set to "${savedFilter.name}".`);
+  }
+
+  async function clearDefault() {
+    const defaultByStatus = { ...(advancedFilters?.defaultByStatus || {}) };
+    delete defaultByStatus[activeStatus];
+    await persistAdvancedFilters({ filters: savedFilters, defaultByStatus }, "Default cleared.");
+  }
+
+  function applyDraft() {
+    onApply(normalizeAdvancedFilter(draft));
+    onClose();
+  }
+
+  function clearAndApplyFilter() {
+    const clearedFilter = defaultAdvancedFilter();
+    setDraft(clearedFilter);
+    onApply(clearedFilter);
+    onClose();
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="advanced-filter-dialog" role="dialog" aria-modal="true" aria-labelledby="advanced-filter-title">
+        <div className="dialog-header">
+          <div className="dialog-title-row">
+            <h2 id="advanced-filter-title">Advanced Filters</h2>
+            <span className="app-version">{statusLabel(activeStatus)}</span>
+          </div>
+          <button type="button" className="icon-close" title="Close without applying draft changes." onClick={onClose} aria-label="Close advanced filters">
+            x
+          </button>
+        </div>
+
+        <div className="advanced-filter-body">
+          {message ? <div className="success-banner compact">{message}</div> : null}
+          {error ? <div className="error-banner compact">{error}</div> : null}
+
+          <section className="advanced-filter-section">
+            <h3>Saved Filters</h3>
+            <div className="advanced-filter-row-grid saved-filter-grid">
+              <label className="field-stack">
+                <span>Saved filter</span>
+                <select value={selectedSavedId} title="Choose a saved advanced filter to load, set as default, or delete." onChange={(event) => setSelectedSavedId(event.target.value)}>
+                  <option value="">Choose saved filter</option>
+                  {savedFilters.map((savedFilter) => (
+                    <option value={savedFilter.id} key={savedFilter.id}>
+                      {savedFilter.name}{savedFilter.id === defaultSavedId ? " (default)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button type="button" title="Load the selected saved filter into the draft controls." disabled={!selectedSavedId || saving} onClick={loadSavedFilter}>Load</button>
+              <button type="button" title="Use the selected saved filter automatically for this status tab." disabled={!selectedSavedId || saving} onClick={setSelectedAsDefault}>Always Load</button>
+              <button type="button" className="danger-button" title="Delete the selected saved filter." disabled={!selectedSavedId || saving} onClick={deleteSavedFilter}>Delete</button>
+            </div>
+            <div className="advanced-filter-row-grid save-filter-grid">
+              <label className="field-stack">
+                <span>Name</span>
+                <input value={saveName} maxLength={80} title="Name used when saving the current draft filter." onChange={(event) => setSaveName(event.target.value)} placeholder="Saved filter name" />
+              </label>
+              <label className="checkbox-row" title="Also make this saved filter the default for this status tab.">
+                <input type="checkbox" checked={saveAsDefault} onChange={(event) => setSaveAsDefault(event.target.checked)} />
+                Always load for this tab
+              </label>
+              <button type="button" title="Save the current draft filter under the entered name." disabled={saving} onClick={saveCurrentFilter}>{saving ? "Saving..." : "Save Current"}</button>
+              <button type="button" className="ghost-button" title="Stop automatically loading a saved filter for this status tab." disabled={!defaultSavedId || saving} onClick={clearDefault}>Clear Default</button>
+            </div>
+          </section>
+
+          <section className="advanced-filter-section">
+            <h3>Text</h3>
+            <div className="advanced-filter-row-grid three-column-grid">
+              <label className="field-stack">
+                <span>Search titles or notes</span>
+                <input value={draft.query} title="Match text in titles or notes." onChange={(event) => updateDraft({ query: event.target.value })} />
+              </label>
+              <label className="field-stack">
+                <span>Title contains</span>
+                <input value={draft.title} title="Match text in any loaded title field." onChange={(event) => updateDraft({ title: event.target.value })} />
+              </label>
+              <label className="field-stack">
+                <span>Notes contain</span>
+                <input value={draft.notes} title="Match text in AniList notes." onChange={(event) => updateDraft({ notes: event.target.value })} />
+              </label>
+            </div>
+          </section>
+
+          <section className="advanced-filter-section">
+            <h3>Flags</h3>
+            <div className="advanced-filter-chip-grid">
+              <fieldset className="advanced-filter-flag-group" title="Filter by availability completion state. Only one option in this group can be active.">
+                <legend>Availability</legend>
+                <label className="filter-chip">
+                  <input type="checkbox" checked={draft.completeOnly} onChange={(event) => updateBoolean("completeOnly", event.target.checked)} />
+                  Complete
+                </label>
+                <label className="filter-chip">
+                  <input type="checkbox" checked={draft.incompleteOnly} onChange={(event) => updateBoolean("incompleteOnly", event.target.checked)} />
+                  Incomplete
+                </label>
+              </fieldset>
+              <fieldset className="advanced-filter-flag-group" title="Filter by watched progress compared with the known episode total. Only one option in this group can be active.">
+                <legend>Progress</legend>
+                <label className="filter-chip">
+                  <input type="checkbox" checked={draft.progressCompleteOnly} onChange={(event) => updateBoolean("progressCompleteOnly", event.target.checked)} />
+                  Complete
+                </label>
+                <label className="filter-chip">
+                  <input type="checkbox" checked={draft.progressIncompleteOnly} onChange={(event) => updateBoolean("progressIncompleteOnly", event.target.checked)} />
+                  Incomplete
+                </label>
+              </fieldset>
+              <fieldset className="advanced-filter-flag-group" title="Filter by whether your AniList score is present. Only one option in this group can be active.">
+                <legend>Score</legend>
+                <label className="filter-chip">
+                  <input type="checkbox" checked={draft.hasScoreOnly} onChange={(event) => updateBoolean("hasScoreOnly", event.target.checked)} />
+                  Has
+                </label>
+                <label className="filter-chip">
+                  <input type="checkbox" checked={draft.missingScoreOnly} onChange={(event) => updateBoolean("missingScoreOnly", event.target.checked)} />
+                  Missing
+                </label>
+              </fieldset>
+              <label className="filter-chip" title="Show entries with at least one dubbed episode available.">
+                <input type="checkbox" checked={draft.dubOnly} onChange={(event) => updateBoolean("dubOnly", event.target.checked)} />
+                Has dub
+              </label>
+              <label className={alertsFilterEnabled ? "filter-chip" : "filter-chip disabled"} title={alertsFilterEnabled ? "Show entries with a configured unwatched availability alert." : "Enable an unwatched sub or dub alert in Watch Now settings to use this filter."}>
+                <input type="checkbox" checked={draft.unwatchedAlertOnly && alertsFilterEnabled} disabled={!alertsFilterEnabled} onChange={(event) => updateBoolean("unwatchedAlertOnly", event.target.checked)} />
+                Alerts
+              </label>
+              <label className="filter-chip" title="Show entries with a local count override or forced airing override.">
+                <input type="checkbox" checked={draft.availabilityOverrideOnly} onChange={(event) => updateBoolean("availabilityOverrideOnly", event.target.checked)} />
+                Has count/airing override
+              </label>
+              <label className="filter-chip" title="Show entries that have AniList notes.">
+                <input type="checkbox" checked={draft.hasNotesOnly} onChange={(event) => updateBoolean("hasNotesOnly", event.target.checked)} />
+                Has notes
+              </label>
+            </div>
+          </section>
+
+          <section className="advanced-filter-section">
+            <h3>Formats, Genres, And Ratings</h3>
+            <div className="advanced-filter-option-block">
+              <strong>Series format</strong>
+              <div className="advanced-filter-chip-grid">
+                {Object.entries(FORMAT_LABELS).map(([value, label]) => (
+                  <label className="filter-chip" title={`Show ${label} entries.`} key={value}>
+                    <input type="checkbox" checked={draft.formats.includes(value)} onChange={(event) => toggleListValue("formats", value, event.target.checked)} />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="advanced-filter-option-block">
+              <strong>Genres</strong>
+              {genreOptions.length === 0 ? <p>No genres are loaded for this list yet.</p> : (
+                <div className="advanced-filter-chip-grid genre-chip-grid">
+                  {genreOptions.map((genre) => (
+                    <label className="filter-chip" title={`Show entries tagged with ${genre}.`} key={genre}>
+                      <input type="checkbox" checked={draft.genres.includes(genre)} onChange={(event) => toggleListValue("genres", genre, event.target.checked)} />
+                      {genre}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="advanced-filter-option-block">
+              <strong>Ratings</strong>
+              {ratingOptions.length === 0 ? <p>No cached ratings are loaded for this list yet.</p> : (
+                <div className="advanced-filter-chip-grid">
+                  {ratingOptions.map((rating) => (
+                    <label className="filter-chip" title={`Show entries with cached rating ${rating}.`} key={rating}>
+                      <input type="checkbox" checked={draft.ratings.includes(rating)} onChange={(event) => toggleListValue("ratings", rating, event.target.checked)} />
+                      {rating}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="advanced-filter-section">
+            <h3>Numeric Filters</h3>
+            <div className="numeric-filter-grid">
+              {NUMERIC_FILTER_FIELDS.map((field) => (
+                <div className="numeric-filter-row" key={field.value}>
+                  <span>{field.label}</span>
+                  <select value={draft.numeric[field.value].operator} title={`Comparison operator for ${field.label}.`} onChange={(event) => updateNumeric(field.value, { operator: event.target.value })} aria-label={`${field.label} operator`}>
+                    <option value="">Any</option>
+                    {NUMERIC_FILTER_OPERATORS.map((operator) => (
+                      <option value={operator.value} key={operator.value}>{operator.label}</option>
+                    ))}
+                  </select>
+                  <input
+                    value={draft.numeric[field.value].value}
+                    inputMode="decimal"
+                    title={`Comparison value for ${field.label}. Leave blank to ignore this filter.`}
+                    onChange={(event) => updateNumeric(field.value, { value: event.target.value.replace(/[^0-9.-]/g, "") })}
+                    aria-label={`${field.label} value`}
+                  />
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="advanced-filter-section">
+            <h3>Sorting</h3>
+            <div className="advanced-filter-row-grid sort-filter-grid">
+              <label className="field-stack">
+                <span>Primary</span>
+                <select
+                  value={draft.sort.primary}
+                  title="Primary sort field for filtered results."
+                  onChange={(event) => updateDraft((current) => ({
+                    ...current,
+                    sort: {
+                      ...current.sort,
+                      primary: event.target.value,
+                      primaryDirection: defaultSortDirection(event.target.value),
+                      secondary: current.sort.secondary === event.target.value ? "" : current.sort.secondary
+                    }
+                  }))}
+                >
+                  {SORT_OPTIONS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
+                </select>
+              </label>
+              <label className="field-stack">
+                <span>Direction</span>
+                <select value={draft.sort.primaryDirection} title="Direction for the primary sort field." onChange={(event) => updateDraft((current) => ({ ...current, sort: { ...current.sort, primaryDirection: event.target.value } }))}>
+                  {SORT_DIRECTIONS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
+                </select>
+              </label>
+              <label className="field-stack">
+                <span>Secondary</span>
+                <select value={draft.sort.secondary} title="Optional secondary sort field used when primary values match." onChange={(event) => updateDraft((current) => ({ ...current, sort: { ...current.sort, secondary: event.target.value, secondaryDirection: defaultSortDirection(event.target.value || "year") } }))}>
+                  <option value="">None</option>
+                  {SORT_OPTIONS.filter((option) => option.value !== draft.sort.primary).map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
+                </select>
+              </label>
+              <label className="field-stack">
+                <span>Direction</span>
+                <select value={draft.sort.secondaryDirection} title="Direction for the secondary sort field." disabled={!draft.sort.secondary} onChange={(event) => updateDraft((current) => ({ ...current, sort: { ...current.sort, secondaryDirection: event.target.value } }))}>
+                  {SORT_DIRECTIONS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
+                </select>
+              </label>
+            </div>
+          </section>
+        </div>
+
+        <div className="advanced-filter-actions">
+          <button type="button" className="ghost-button" title="Reset the draft controls without applying yet." onClick={() => setDraft(defaultAdvancedFilter())}>Reset</button>
+          <button type="button" className="ghost-button" title="Clear all filters, apply immediately, and close this dialog." onClick={clearAndApplyFilter}>Clear Filter</button>
+          <button type="button" title="Apply the current draft filter and close this dialog." onClick={applyDraft}>Apply</button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -2838,6 +3801,15 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
               <label className="checkbox-row">
                 <input
                   type="checkbox"
+                  checked={settings.appearance.showSynonymSubtitle}
+                  disabled={saving}
+                  onChange={(event) => saveAppearance({ showSynonymSubtitle: event.target.checked })}
+                />
+                Show synonym subtitle
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
                   checked={settings.appearance.showSynonymInfoIcon}
                   disabled={saving}
                   onChange={(event) => saveAppearance({ showSynonymInfoIcon: event.target.checked })}
@@ -3106,6 +4078,7 @@ function App() {
   const [offlineSyncFailures, setOfflineSyncFailures] = useState([]);
   const [settings, setSettings] = useState(() => defaultSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [advancedFilterOpen, setAdvancedFilterOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
   const [exportOpen, setExportOpen] = useState(false);
@@ -3115,7 +4088,7 @@ function App() {
   const [refreshChoiceOpen, setRefreshChoiceOpen] = useState(false);
   const [overrideTarget, setOverrideTarget] = useState(null);
   const [watchServerMenu, setWatchServerMenu] = useState(null);
-  const [query, setQuery] = useState("");
+  const [advancedFilterMenu, setAdvancedFilterMenu] = useState(null);
   const [addQuery, setAddQuery] = useState("");
   const [addSearchResults, setAddSearchResults] = useState([]);
   const [addSearchLoading, setAddSearchLoading] = useState(false);
@@ -3130,12 +4103,10 @@ function App() {
   const [availabilityLoading, setAvailabilityLoading] = useState(false);
   const [availabilityProgress, setAvailabilityProgress] = useState({ checked: 0, total: 0 });
   const [availabilityWarning, setAvailabilityWarning] = useState("");
+  const [loadDiagnostics, setLoadDiagnostics] = useState("");
+  const [loadProgress, setLoadProgress] = useState("");
   const [showNotes, setShowNotes] = useState(() => defaultSettings().showNotes);
-  const [completeOnly, setCompleteOnly] = useState(false);
-  const [incompleteOnly, setIncompleteOnly] = useState(false);
-  const [dubOnly, setDubOnly] = useState(false);
-  const [unwatchedAlertOnly, setUnwatchedAlertOnly] = useState(false);
-  const [sortOrder, setSortOrder] = useState("english");
+  const [advancedFilter, setAdvancedFilter] = useState(() => defaultAdvancedFilter());
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [loading, setLoading] = useState(true);
   const [updatingCompletedProgress, setUpdatingCompletedProgress] = useState(false);
@@ -3143,6 +4114,7 @@ function App() {
   const [focusedPreviewId, setFocusedPreviewId] = useState(null);
   const [focusedPreviewOrigin, setFocusedPreviewOrigin] = useState(null);
   const [error, setError] = useState("");
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [systemDark, setSystemDark] = useState(() => window.matchMedia?.("(prefers-color-scheme: dark)").matches === true);
   const listRunId = useRef(0);
   const listAbortController = useRef(null);
@@ -3154,11 +4126,20 @@ function App() {
   const completedProgressAbortController = useRef(null);
   const scrollRestoreRunId = useRef(0);
   const offlineQueueRef = useRef(null);
+  const defaultFilterApplyRef = useRef("");
+  const previousSimplifiedViewRef = useRef(settings.simplifiedView === true);
   const alertsFilterEnabled = settings.watchNow.showUnwatchedDubAlert === true || settings.watchNow.showUnwatchedSubAlert === true;
-  const activeUnwatchedAlertOnly = unwatchedAlertOnly && alertsFilterEnabled;
+  const activeUnwatchedAlertOnly = advancedFilter.unwatchedAlertOnly && alertsFilterEnabled;
   const isAddTab = activeStatus === ADD_STATUS;
   const offlineEnabled = offline?.enabled === true;
   const showUpdateMarker = updateInfo?.updateAvailable === true && updateInfo?.ignored !== true;
+  const simplifiedView = settings.simplifiedView === true;
+  const dubOnly = advancedFilter.dubOnly;
+  const missingScoreOnly = advancedFilter.missingScoreOnly;
+  const sortOrder = advancedFilter.sort.primary;
+  const genreOptions = useMemo(() => availableGenreOptions(entries), [entries]);
+  const ratingOptions = useMemo(() => availableRatingOptions(entries, ratings), [entries, ratings]);
+  const advancedFilterActive = advancedFilterHasActiveCriteria(advancedFilter);
 
   async function load(status = activeStatus) {
     if (status === ADD_STATUS) {
@@ -3171,6 +4152,7 @@ function App() {
     const abortController = new AbortController();
     listAbortController.current = abortController;
     setLoading(true);
+    setLoadProgress("Checking local app status...");
     setError("");
     try {
       const healthPayload = await api("/api/health", { signal: abortController.signal });
@@ -3185,6 +4167,8 @@ function App() {
         setAvailability({});
         setAvailabilityProgress({ checked: 0, total: 0 });
         setAvailabilityWarning("");
+        setLoadDiagnostics("");
+        setLoadProgress("");
         setSelectedIds(new Set());
         setError(healthPayload.cliImportAvailable
           ? "AniList token is missing. Open Settings to import your anilist-cli token or save a new token."
@@ -3192,7 +4176,33 @@ function App() {
         return;
       }
 
-      const listPayload = await api(`/api/lists?status=${encodeURIComponent(status)}&type=ANIME`, { signal: abortController.signal });
+      let listPayload;
+      if (healthPayload.offline?.enabled === true) {
+        setLoadProgress("Loading local list...");
+        listPayload = await api(`/api/lists?status=${encodeURIComponent(status)}&type=ANIME`, { signal: abortController.signal });
+      } else {
+        setLoadProgress("Loading AniList items... 0 found.");
+        let chunk = 1;
+        let mergedEntries = [];
+        const chunkPayloads = [];
+        let hasNextChunk = true;
+        while (hasNextChunk) {
+          const chunkPayload = await api(`/api/lists?status=${encodeURIComponent(status)}&type=ANIME&chunk=${chunk}&perChunk=${LIST_CHUNK_SIZE}`, { signal: abortController.signal });
+          if (listRunId.current !== runId) {
+            return;
+          }
+          chunkPayloads.push(chunkPayload);
+          mergedEntries = mergeUniqueEntries(mergedEntries, chunkPayload.entries || []);
+          setLoadProgress(`Loading AniList items... ${mergedEntries.length} found.`);
+          hasNextChunk = chunkPayload.diagnostics?.hasNextChunk === true;
+          listPayload = {
+            ...chunkPayload,
+            entries: mergedEntries,
+            diagnostics: combineChunkDiagnostics(chunkPayloads, mergedEntries.length)
+          };
+          chunk += 1;
+        }
+      }
       if (listRunId.current !== runId) {
         return;
       }
@@ -3203,8 +4213,10 @@ function App() {
       setRatings(listPayload.ratings || {});
       setAvailabilityProgress({ checked: 0, total: 0 });
       setAvailabilityWarning("");
+      setLoadDiagnostics(formatLoadDiagnostics(listPayload.diagnostics));
+      setLoadProgress("");
       setSelectedIds(new Set());
-      if (!listPayload.offline) {
+      if (!listPayload.offline && !simplifiedView) {
         const cacheOnly = hasRecentAutoAvailability(status);
         if (!cacheOnly) {
           markAutoAvailability(status);
@@ -3220,6 +4232,8 @@ function App() {
       setAvailability({});
       setAvailabilityProgress({ checked: 0, total: 0 });
       setAvailabilityWarning("");
+      setLoadDiagnostics(loadError.details?.source ? `${loadError.details.source}: ${loadError.message}` : "");
+      setLoadProgress("");
       setSelectedIds(new Set());
       setError(loadError.message);
     } finally {
@@ -3265,10 +4279,14 @@ function App() {
     setAvailabilityLoading(false);
     setAvailabilityProgress({ checked: 0, total: 0 });
     setAvailabilityWarning("");
+    setLoadDiagnostics("");
+    setLoadProgress("");
     setSelectedIds(new Set());
     setRefreshChoiceOpen(false);
     setOverrideTarget(null);
     setWatchServerMenu(null);
+    setAdvancedFilterMenu(null);
+    setAdvancedFilterOpen(false);
     setUpdatingCompletedProgress(false);
     setCompletedProgressUpdate({ checked: 0, total: 0 });
     setFocusedPreviewId(null);
@@ -3290,6 +4308,8 @@ function App() {
       const fallbackSettings = defaultSettings();
       setSettings(fallbackSettings);
       setShowNotes(fallbackSettings.showNotes);
+    } finally {
+      setSettingsLoaded(true);
     }
   }
 
@@ -3311,6 +4331,62 @@ function App() {
     const payload = await api("/api/update/ignore", { method: "POST" });
     setUpdateInfo(payload);
     return payload;
+  }
+
+  function updateAdvancedFilter(updater) {
+    setAdvancedFilter((current) => normalizeAdvancedFilter(typeof updater === "function" ? updater(current) : { ...current, ...updater }));
+  }
+
+  function clearAdvancedFilter() {
+    setAdvancedFilter(defaultAdvancedFilter());
+  }
+
+  function openAdvancedFilterMenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    setAdvancedFilterMenu(linkMenuPosition(event, 170, 48));
+  }
+
+  function setAdvancedFilterBoolean(name, checked) {
+    updateAdvancedFilter((current) => ({
+      ...current,
+      completeOnly: name === "incompleteOnly" && checked ? false : current.completeOnly,
+      incompleteOnly: name === "completeOnly" && checked ? false : current.incompleteOnly,
+      progressCompleteOnly: name === "progressIncompleteOnly" && checked ? false : current.progressCompleteOnly,
+      progressIncompleteOnly: name === "progressCompleteOnly" && checked ? false : current.progressIncompleteOnly,
+      hasScoreOnly: name === "missingScoreOnly" && checked ? false : current.hasScoreOnly,
+      missingScoreOnly: name === "hasScoreOnly" && checked ? false : current.missingScoreOnly,
+      [name]: checked
+    }));
+  }
+
+  function setPrimarySortOrder(value) {
+    updateAdvancedFilter((current) => ({
+      ...current,
+      sort: {
+        ...current.sort,
+        primary: value,
+        primaryDirection: defaultSortDirection(value),
+        secondary: current.sort.secondary === value ? "" : current.sort.secondary
+      }
+    }));
+  }
+
+  async function saveAdvancedFilters(nextAdvancedFilters) {
+    const normalizedAdvancedFilters = normalizeAdvancedFilters(nextAdvancedFilters);
+    const previousSettings = settings;
+    setSettings(normalizeSettings({ ...settings, advancedFilters: normalizedAdvancedFilters }));
+    try {
+      const payload = normalizeSettings(await api("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ advancedFilters: normalizedAdvancedFilters })
+      }));
+      setSettings(payload);
+      return payload.advancedFilters;
+    } catch (settingsError) {
+      setSettings(previousSettings);
+      throw settingsError;
+    }
   }
 
   useEffect(() => {
@@ -3356,8 +4432,27 @@ function App() {
     }
   }
 
+  async function toggleSimplifiedView(checked) {
+    const previousSettings = settings;
+    setSettings(normalizeSettings({ ...settings, simplifiedView: checked }));
+    if (checked) {
+      cancelAvailabilityRefresh();
+      setRefreshChoiceOpen(false);
+    }
+    try {
+      const nextSettings = normalizeSettings(await api("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ simplifiedView: checked })
+      }));
+      setSettings(nextSettings);
+    } catch (settingsError) {
+      setSettings(previousSettings);
+      setError(settingsError.message);
+    }
+  }
+
   async function loadAvailability(entriesToCheck = entries, refresh = false, options = {}) {
-    if (offlineEnabled) {
+    if (offlineEnabled || simplifiedView) {
       return true;
     }
     const runId = availabilityRunId.current + 1;
@@ -3538,7 +4633,13 @@ function App() {
   }
 
   function startAvailabilityRefresh(mode) {
+    if (simplifiedView) {
+      setRefreshChoiceOpen(false);
+      setAvailabilityWarning("Recheck Episodes is disabled while Simplified view is active.");
+      return;
+    }
     const targets = actionTargetEntries();
+    const forceSelectedAll = mode === "all" && selectedIds.size > 0;
     const eligibleEntries = mode === "missing"
       ? targets.filter((entry) => isAvailabilityMissing(availability[entry.mediaId]))
       : mode === "airing"
@@ -3551,15 +4652,23 @@ function App() {
         : "No missing availability entries in the current target set.");
       return;
     }
-    const entriesToRefresh = eligibleEntries.filter((entry) => !isPermanentAvailability(availability[entry.mediaId]));
+    const entriesToRefresh = forceSelectedAll
+      ? eligibleEntries.filter((entry) => !isLocalAvailabilityOverride(availability[entry.mediaId]))
+      : eligibleEntries.filter((entry) => !isPermanentAvailability(availability[entry.mediaId]));
     if (entriesToRefresh.length === 0) {
-      setAvailabilityWarning("No non-permanent availability entries in the current target set.");
+      setAvailabilityWarning(forceSelectedAll
+        ? "Selected entries are local availability overrides. Clear overrides before rechecking provider availability."
+        : "No non-permanent availability entries in the current target set.");
       return;
     }
-    loadAvailability(entriesToRefresh, true, { force: true, preloadReusableCache: true });
+    loadAvailability(entriesToRefresh, true, { force: true, preloadReusableCache: !forceSelectedAll });
   }
 
   async function recheckEpisodes() {
+    if (simplifiedView) {
+      setAvailabilityWarning("Recheck Episodes is disabled while Simplified view is active.");
+      return;
+    }
     if (offlineEnabled) {
       setAvailabilityWarning("Recheck Episodes is disabled while Offline Mode is active.");
       return;
@@ -3813,105 +4922,67 @@ function App() {
   }, [offlineQueueOpen]);
 
   useEffect(() => {
-    if (activeStatus !== ADD_STATUS) {
+    if (settingsLoaded && activeStatus !== ADD_STATUS) {
       load(activeStatus);
     }
-  }, [activeStatus]);
+  }, [activeStatus, settingsLoaded]);
 
   useEffect(() => {
-    if (!alertsFilterEnabled && unwatchedAlertOnly) {
-      setUnwatchedAlertOnly(false);
+    const wasSimplifiedView = previousSimplifiedViewRef.current;
+    previousSimplifiedViewRef.current = simplifiedView;
+    if (
+      !wasSimplifiedView ||
+      simplifiedView ||
+      !settingsLoaded ||
+      isAddTab ||
+      offlineEnabled ||
+      entries.length === 0
+    ) {
+      return;
     }
-  }, [alertsFilterEnabled, unwatchedAlertOnly]);
+
+    const cacheOnly = hasRecentAutoAvailability(activeStatus);
+    if (!cacheOnly) {
+      markAutoAvailability(activeStatus);
+    }
+    loadAvailability(entries, false, { cacheOnly, preloadReusableCache: true, background: cacheOnly });
+    loadRatings(entries);
+  }, [activeStatus, entries, isAddTab, offlineEnabled, settingsLoaded, simplifiedView]);
+
+  useEffect(() => {
+    if (!alertsFilterEnabled && advancedFilter.unwatchedAlertOnly) {
+      updateAdvancedFilter({ unwatchedAlertOnly: false });
+    }
+  }, [alertsFilterEnabled, advancedFilter.unwatchedAlertOnly]);
+
+  useEffect(() => {
+    if (isAddTab) {
+      return;
+    }
+    const defaultSavedId = settings.advancedFilters?.defaultByStatus?.[activeStatus] || "";
+    const applyKey = `${activeStatus}:${defaultSavedId}`;
+    if (defaultFilterApplyRef.current === applyKey) {
+      return;
+    }
+    defaultFilterApplyRef.current = applyKey;
+    const savedFilter = settings.advancedFilters?.filters?.find((item) => item.id === defaultSavedId);
+    setAdvancedFilter(savedFilter ? normalizeAdvancedFilter(savedFilter.filter) : defaultAdvancedFilter());
+  }, [activeStatus, isAddTab, settings.advancedFilters]);
 
   const filteredEntries = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    const filtered = entries.filter((entry) => {
-      const matchesQuery = !normalizedQuery ||
-        [entry.title, entry.romajiTitle, entry.nativeTitle, entry.notes].filter(Boolean).some((value) => value.toLowerCase().includes(normalizedQuery));
-      const matchesComplete = !completeOnly || isAvailabilityComplete(availability[entry.mediaId]);
-      const matchesIncomplete = !incompleteOnly || isAvailabilityIncomplete(availability[entry.mediaId]);
-      const matchesDub = !dubOnly || Number(availability[entry.mediaId]?.dubEpisodes || 0) > 0;
-      const matchesUnwatchedAlert = !activeUnwatchedAlertOnly || Boolean(availabilityAlertState(entry, availability[entry.mediaId], activeStatus, settings.watchNow).label);
-      return matchesQuery && matchesComplete && matchesIncomplete && matchesDub && matchesUnwatchedAlert;
+    const effectiveFilter = normalizeAdvancedFilter({
+      ...advancedFilter,
+      unwatchedAlertOnly: activeUnwatchedAlertOnly
     });
-    return [...filtered].sort((a, b) => {
-      const availabilityA = availability[a.mediaId] || {};
-      const availabilityB = availability[b.mediaId] || {};
-      if (sortOrder === "romaji") {
-        return (a.romajiTitle || a.title).localeCompare(b.romajiTitle || b.title);
-      }
-      if (sortOrder === "year") {
-        return (entryYear(b) || 0) - (entryYear(a) || 0) || a.title.localeCompare(b.title);
-      }
-      if (sortOrder === "progress") {
-        return b.progress - a.progress || a.title.localeCompare(b.title);
-      }
-      if (sortOrder === "total") {
-        return (availabilityB.totalEpisodes || b.totalEpisodes || 0) - (availabilityA.totalEpisodes || a.totalEpisodes || 0) || a.title.localeCompare(b.title);
-      }
-      if (sortOrder === "sub") {
-        return (availabilityB.subEpisodes || 0) - (availabilityA.subEpisodes || 0) || a.title.localeCompare(b.title);
-      }
-      if (sortOrder === "dub") {
-        return (availabilityB.dubEpisodes || 0) - (availabilityA.dubEpisodes || 0) || a.title.localeCompare(b.title);
-      }
-      if (sortOrder === "personalScore") {
-        const scoreA = Number(a.score) || 0;
-        const scoreB = Number(b.score) || 0;
-        return Number(scoreA <= 0) - Number(scoreB <= 0) || scoreB - scoreA || a.title.localeCompare(b.title);
-      }
-      if (sortOrder === "publicScore") {
-        const scoreA = Number(a.publicScore) || 0;
-        const scoreB = Number(b.publicScore) || 0;
-        return Number(scoreA <= 0) - Number(scoreB <= 0) || scoreB - scoreA || a.title.localeCompare(b.title);
-      }
-      if (sortOrder === "notes") {
-        const noteA = a.notes?.trim() || "";
-        const noteB = b.notes?.trim() || "";
-        return Number(!noteA) - Number(!noteB) || noteA.localeCompare(noteB) || a.title.localeCompare(b.title);
-      }
-      if (sortOrder === "rating") {
-        const ratingA = ratings[a.mediaId]?.ratingLabel || "";
-        const ratingB = ratings[b.mediaId]?.ratingLabel || "";
-        return (RATING_SORT_RANKS[ratingB] || 0) - (RATING_SORT_RANKS[ratingA] || 0) || ratingA.localeCompare(ratingB) || a.title.localeCompare(b.title);
-      }
-      return a.title.localeCompare(b.title);
-    });
-  }, [activeStatus, activeUnwatchedAlertOnly, availability, completeOnly, entries, incompleteOnly, dubOnly, query, ratings, settings.watchNow, sortOrder]);
+    const context = { filter: effectiveFilter, availability, ratings, activeStatus, watchNow: settings.watchNow };
+    return entries
+      .filter((entry) => entryMatchesAdvancedFilter(entry, context))
+      .sort((a, b) => compareEntriesByAdvancedSort(a, b, context));
+  }, [activeStatus, activeUnwatchedAlertOnly, advancedFilter, availability, entries, ratings, settings.watchNow]);
   const sortedAddSearchResults = useMemo(() => {
     return addSearchResults.filter((entry) => (
       !addDubOnly || Number(availability[entry.mediaId]?.dubEpisodes || 0) > 0
-    )).sort((a, b) => {
-      if (sortOrder === "romaji") {
-        return (a.romajiTitle || a.title).localeCompare(b.romajiTitle || b.title);
-      }
-      if (sortOrder === "year") {
-        return (entryYear(b) || 0) - (entryYear(a) || 0) || a.title.localeCompare(b.title);
-      }
-      if (sortOrder === "progress") {
-        return b.progress - a.progress || a.title.localeCompare(b.title);
-      }
-      if (sortOrder === "total") {
-        return (b.totalEpisodes || 0) - (a.totalEpisodes || 0) || a.title.localeCompare(b.title);
-      }
-      if (sortOrder === "personalScore") {
-        const scoreA = Number(a.score) || 0;
-        const scoreB = Number(b.score) || 0;
-        return Number(scoreA <= 0) - Number(scoreB <= 0) || scoreB - scoreA || a.title.localeCompare(b.title);
-      }
-      if (sortOrder === "publicScore") {
-        const scoreA = Number(a.publicScore) || 0;
-        const scoreB = Number(b.publicScore) || 0;
-        return Number(scoreA <= 0) - Number(scoreB <= 0) || scoreB - scoreA || a.title.localeCompare(b.title);
-      }
-      if (sortOrder === "notes") {
-        const noteA = a.notes?.trim() || "";
-        const noteB = b.notes?.trim() || "";
-        return Number(!noteA) - Number(!noteB) || noteA.localeCompare(noteB) || a.title.localeCompare(b.title);
-      }
-      return a.title.localeCompare(b.title);
-    });
+    )).sort((a, b) => compareAddSearchEntries(a, b, sortOrder));
   }, [addDubOnly, addSearchResults, availability, sortOrder]);
   const focusedPreviewEntry = (isAddTab ? sortedAddSearchResults : filteredEntries)
     .find((entry) => entry.mediaId === focusedPreviewId) || null;
@@ -4174,6 +5245,22 @@ function App() {
     return entries.filter((entry) => selectedIds.has(entry.mediaId));
   }
 
+  function completedProgressUpdateItems(targetEntries) {
+    return targetEntries
+      .filter((entry) => entry.status === "COMPLETED")
+      .map((entry) => ({
+        entry,
+        currentProgress: Number(entry.progress),
+        targetProgress: Number(entry.totalEpisodes)
+      }))
+      .filter((item) => (
+        Number.isFinite(item.currentProgress)
+        && Number.isFinite(item.targetProgress)
+        && item.targetProgress > 0
+        && item.currentProgress !== item.targetProgress
+      ));
+  }
+
   async function loadCachedExportAvailability(targetEntries, onProgress) {
     const availabilityById = {};
     for (let index = 0; index < targetEntries.length; index += EXPORT_AVAILABILITY_CHUNK_SIZE) {
@@ -4332,14 +5419,7 @@ function App() {
   }
 
   async function updateCompletedProgressToTotals() {
-    const targetEntries = actionTargetEntries();
-    const updates = targetEntries
-      .filter((entry) => entry.status === "COMPLETED")
-      .map((entry) => ({
-        entry,
-        targetProgress: availability[entry.mediaId]?.totalEpisodes || entry.totalEpisodes
-      }))
-      .filter((item) => Number.isFinite(item.targetProgress) && item.targetProgress > 0 && item.entry.progress !== item.targetProgress);
+    const updates = completedProgressUpdateItems(actionTargetEntries());
 
     if (updates.length === 0) {
       setAvailabilityWarning(
@@ -4350,7 +5430,18 @@ function App() {
       return;
     }
     const selectedText = selectedIds.size > 0 ? " selected" : "";
-    if (!window.confirm(`Update watched progress for ${updates.length}${selectedText} completed entries to their known totals?`)) {
+    const listedUpdates = updates.slice(0, 15).map((item) => `- ${item.entry.title}: ${item.currentProgress} -> ${item.targetProgress}`);
+    const truncatedText = updates.length > listedUpdates.length
+      ? `\n...and ${updates.length - listedUpdates.length} more.`
+      : "";
+    const confirmMessage = [
+      `Update watched progress for ${updates.length}${selectedText} completed entries to their known totals?`,
+      "",
+      "Entries to update:",
+      ...listedUpdates,
+      truncatedText
+    ].filter(Boolean).join("\n");
+    if (!window.confirm(confirmMessage)) {
       return;
     }
 
@@ -4399,6 +5490,22 @@ function App() {
     completedProgressAbortController.current = null;
     setUpdatingCompletedProgress(false);
   }
+
+  const recheckEpisodesTitle = simplifiedView
+    ? "Disabled while Simplified view is active."
+    : offlineEnabled
+      ? "Disabled while Offline Mode is active."
+      : "Check current episode availability for the visible list.";
+  const notesModeTitle = showNotes
+    ? "Return to the standard list view."
+    : "Show list entry notes.";
+  const exportTitle = exporting
+    ? "Export in progress."
+    : "Export list data.";
+  const offlineModeTitle = offlineEnabled
+    ? "Turn off Offline Mode and choose how to handle queued changes."
+    : "Use the app without syncing changes until Offline Mode is turned off.";
+  const hasIncompleteCompletedProgress = completedProgressUpdateItems(actionTargetEntries()).length > 0;
 
   return (
     <main>
@@ -4452,36 +5559,52 @@ function App() {
               </p>
             </div>
           </div>
-          <div className="header-actions command-group">
-            <button type="button" className={showUpdateMarker ? "about-button update-available" : "about-button"} onClick={() => setAboutOpen(true)}>
-              About
-              {showUpdateMarker ? <span className="update-marker" aria-hidden="true" /> : null}
-            </button>
-            <button type="button" onClick={() => setSettingsOpen(true)}>
-              Settings
-            </button>
-            <button
-              type="button"
-              className="refresh-availability"
-              disabled={offlineEnabled || availabilityLoading || (isAddTab ? addSearchLoading || sortedAddSearchResults.length === 0 : loading)}
-              onClick={recheckEpisodes}
-              title={offlineEnabled ? "Disabled while Offline Mode is active." : ""}
-            >
-              {availabilityLoading
-                ? (availabilityProgress.total > 0 ? `Checking ${availabilityProgress.checked}/${availabilityProgress.total}...` : "Checking...")
-                : "Recheck Episodes"}
-            </button>
-            {availabilityLoading ? (
-              <button type="button" className="stop-refresh" onClick={cancelAvailabilityRefresh} aria-label="Stop episode recheck" title="Stop episode recheck" />
-            ) : null}
-            <button
-              type="button"
-              className="donate-button"
-              title="Support development"
-              onClick={() => window.open("https://www.paypal.com/donate/?hosted_button_id=JK8ZEGCDMWP94", "_blank", "noreferrer")}
-            >
-              Donate <span className="heart" aria-hidden="true">❤</span>
-            </button>
+          <div className="header-control-stack">
+            <label className="simplified-view-toggle">
+              <input
+                type="checkbox"
+                checked={simplifiedView}
+                disabled={isAddTab}
+                onChange={(event) => toggleSimplifiedView(event.target.checked)}
+              />
+              Simplified view
+            </label>
+            <div className="header-actions command-group">
+              <button
+                type="button"
+                className={showUpdateMarker ? "about-button update-available" : "about-button"}
+                title="View app version, release notes, and update details."
+                onClick={() => setAboutOpen(true)}
+              >
+                About
+                {showUpdateMarker ? <span className="update-marker" aria-hidden="true" /> : null}
+              </button>
+              <button type="button" title="Configure auth, watch providers, appearance, and updates." onClick={() => setSettingsOpen(true)}>
+                Settings
+              </button>
+              <button
+                type="button"
+                className="refresh-availability"
+                disabled={simplifiedView || offlineEnabled || availabilityLoading || (isAddTab ? addSearchLoading || sortedAddSearchResults.length === 0 : loading)}
+                onClick={recheckEpisodes}
+                title={recheckEpisodesTitle}
+              >
+                {availabilityLoading
+                  ? (availabilityProgress.total > 0 ? `Checking ${availabilityProgress.checked}/${availabilityProgress.total}...` : "Checking...")
+                  : "Recheck Episodes"}
+              </button>
+              {availabilityLoading ? (
+                <button type="button" className="stop-refresh" onClick={cancelAvailabilityRefresh} aria-label="Stop episode recheck" title="Stop episode recheck" />
+              ) : null}
+              <button
+                type="button"
+                className="donate-button"
+                title="Support development."
+                onClick={() => window.open("https://www.paypal.com/donate/?hosted_button_id=JK8ZEGCDMWP94", "_blank", "noreferrer")}
+              >
+                Donate <span className="heart" aria-hidden="true">❤</span>
+              </button>
+            </div>
           </div>
         </header>
 
@@ -4503,11 +5626,12 @@ function App() {
             ))}
           </nav>
           <div className="list-actions command-group">
-            {activeStatus === "COMPLETED" && !isAddTab ? (
+            {activeStatus === "COMPLETED" && !isAddTab && (hasIncompleteCompletedProgress || updatingCompletedProgress) ? (
               <button
                 type="button"
                 className="ghost-button"
                 disabled={loading || updatingCompletedProgress}
+                title="Set completed entries to their total episode counts."
                 onClick={updateCompletedProgressToTotals}
               >
                 {updatingCompletedProgress
@@ -4518,13 +5642,21 @@ function App() {
             {updatingCompletedProgress && !isAddTab ? (
               <button type="button" className="stop-refresh" onClick={cancelCompletedProgressUpdate} aria-label="Stop progress update" title="Stop progress update" />
             ) : null}
-            <button type="button" className="ghost-button" disabled={isAddTab || loading} onClick={toggleNotesMode}>
-              {showNotes ? "View Lists" : "View Notes"}
-            </button>
-            <button type="button" className="ghost-button" disabled={isAddTab || loading || exporting} onClick={() => setExportOpen(true)}>
+            {!simplifiedView ? (
+              <button type="button" className="ghost-button" disabled={isAddTab || loading} title={notesModeTitle} onClick={toggleNotesMode}>
+                {showNotes ? "View Lists" : "View Notes"}
+              </button>
+            ) : null}
+            <button type="button" className="ghost-button" disabled={isAddTab || loading || exporting} title={exportTitle} onClick={() => setExportOpen(true)}>
               {exporting ? "Exporting..." : "Export"}
             </button>
-            <button type="button" className={offlineEnabled ? "ghost-button offline-toggle active" : "ghost-button offline-toggle"} disabled={offlineBusy} onClick={toggleOfflineMode}>
+            <button
+              type="button"
+              className={offlineEnabled ? "ghost-button offline-toggle active" : "ghost-button offline-toggle"}
+              disabled={offlineBusy}
+              title={offlineModeTitle}
+              onClick={toggleOfflineMode}
+            >
               {offlineBusy ? "Offline..." : offlineEnabled ? "Turn Off Offline" : "Offline Mode"}
             </button>
           </div>
@@ -4564,7 +5696,7 @@ function App() {
               ) : (
                 <label className="search-box">
                   <span>Search</span>
-                  <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter titles or notes" />
+                  <input value={advancedFilter.query} onChange={(event) => updateAdvancedFilter({ query: event.target.value })} placeholder="Filter titles or notes" />
                 </label>
               )}
             </div>
@@ -4594,37 +5726,28 @@ function App() {
             </div>
             ) : (
               <div className="filter-strip" aria-label="List filters">
-              <label className="filter-chip">
-                <input
-                  type="checkbox"
-                  checked={completeOnly}
-                  onChange={(event) => {
-                    setCompleteOnly(event.target.checked);
-                    if (event.target.checked) {
-                      setIncompleteOnly(false);
-                    }
-                  }}
-                />
-                Complete
-              </label>
-              <label className="filter-chip">
-                <input
-                  type="checkbox"
-                  checked={incompleteOnly}
-                  onChange={(event) => {
-                    setIncompleteOnly(event.target.checked);
-                    if (event.target.checked) {
-                      setCompleteOnly(false);
-                    }
-                  }}
-                />
-                Incomplete
-              </label>
+              <button
+                type="button"
+                className={advancedFilterActive ? "advanced-filter-trigger active" : "advanced-filter-trigger"}
+                onClick={() => setAdvancedFilterOpen(true)}
+                onContextMenu={openAdvancedFilterMenu}
+                aria-label="Advanced sort and filters"
+                title="Advanced sort and filters"
+              >
+                <svg className="sliders-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <line x1="5" y1="3" x2="5" y2="21" />
+                  <line x1="12" y1="3" x2="12" y2="21" />
+                  <line x1="19" y1="3" x2="19" y2="21" />
+                  <circle cx="5" cy="15" r="3.5" />
+                  <circle cx="12" cy="8" r="3.5" />
+                  <circle cx="19" cy="15" r="3.5" />
+                </svg>
+              </button>
               <label className="filter-chip">
                 <input
                   type="checkbox"
                   checked={dubOnly}
-                  onChange={(event) => setDubOnly(event.target.checked)}
+                  onChange={(event) => setAdvancedFilterBoolean("dubOnly", event.target.checked)}
                 />
                 Has dub
               </label>
@@ -4636,16 +5759,26 @@ function App() {
                   type="checkbox"
                   checked={activeUnwatchedAlertOnly}
                   disabled={!alertsFilterEnabled}
-                  onChange={(event) => setUnwatchedAlertOnly(event.target.checked)}
+                  onChange={(event) => setAdvancedFilterBoolean("unwatchedAlertOnly", event.target.checked)}
                 />
                 Alerts
               </label>
+              {activeStatus === "COMPLETED" ? (
+                <label className="filter-chip">
+                  <input
+                    type="checkbox"
+                    checked={missingScoreOnly}
+                    onChange={(event) => setAdvancedFilterBoolean("missingScoreOnly", event.target.checked)}
+                  />
+                  Missing Score
+                </label>
+              ) : null}
             </div>
             )}
             <div className="list-state">
               <label className="sort-box">
                 <span>Order</span>
-                <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value)}>
+                <select value={sortOrder} onChange={(event) => setPrimarySortOrder(event.target.value)}>
                   {SORT_OPTIONS.map((option) => (
                     <option value={option.value} key={option.value}>
                       {option.label}
@@ -4657,16 +5790,20 @@ function App() {
           </div>
           <div className="toolbar-secondary">
             {!isAddTab ? (
-              <label className="filter-chip select-visible-chip">
-                <input
-                  type="checkbox"
-                  checked={filteredEntries.length > 0 && filteredEntries.every((entry) => selectedIds.has(entry.mediaId))}
-                  onChange={(event) => selectVisible(event.target.checked)}
-                />
-                Select visible
-              </label>
+              <div className="secondary-filter-actions">
+                <label className="filter-chip select-visible-chip">
+                  <input
+                    type="checkbox"
+                    checked={filteredEntries.length > 0 && filteredEntries.every((entry) => selectedIds.has(entry.mediaId))}
+                    onChange={(event) => selectVisible(event.target.checked)}
+                  />
+                  Select visible
+                </label>
+              </div>
             ) : null}
-            <span className="count">{isAddTab ? `${sortedAddSearchResults.length} results` : `${filteredEntries.length} entries`}</span>
+            <span className="count">
+              {isAddTab ? `${sortedAddSearchResults.length} results` : `${filteredEntries.length} entries`}
+            </span>
           </div>
         </section>
       </section>
@@ -4706,6 +5843,19 @@ function App() {
         onExport={exportEntries}
       />
 
+      <AdvancedFilterDialog
+        open={advancedFilterOpen && !isAddTab}
+        activeStatus={activeStatus}
+        filter={advancedFilter}
+        advancedFilters={settings.advancedFilters}
+        genreOptions={genreOptions}
+        ratingOptions={ratingOptions}
+        alertsFilterEnabled={alertsFilterEnabled}
+        onClose={() => setAdvancedFilterOpen(false)}
+        onApply={setAdvancedFilter}
+        onSaveAdvancedFilters={saveAdvancedFilters}
+      />
+
       <OfflineDisableDialog
         open={offlineDisableOpen}
         queued={Number(offline?.queued || 0)}
@@ -4731,6 +5881,7 @@ function App() {
         onRemove={removeAvailabilityOverride}
       />
       <WatchServerMenu menu={watchServerMenu} onClose={() => setWatchServerMenu(null)} />
+      <AdvancedFilterMenu menu={advancedFilterMenu} onClose={() => setAdvancedFilterMenu(null)} onClear={clearAdvancedFilter} />
       <FocusedEntryPreview entry={focusedPreviewEntry} origin={focusedPreviewOrigin} onClose={closeFocusedPreview} />
 
       {error ? <div className="error-banner">{error}</div> : null}
@@ -4764,6 +5915,7 @@ function App() {
                     availability={availability[entry.mediaId]}
                     watchNow={settings.watchNow}
                     alertIconId={settings.appearance.alertIcon}
+                    showSynonymSubtitle={settings.appearance.showSynonymSubtitle}
                     showSynonymInfoIcon={settings.appearance.showSynonymInfoIcon}
                     offlineMode={offlineEnabled}
                     onAdded={updateAddSearchResult}
@@ -4776,7 +5928,7 @@ function App() {
           </>
         ) : (
           <>
-            {loading && entries.length === 0 ? <div className="empty-state">Loading...</div> : null}
+            {loading && entries.length === 0 ? <div className="empty-state">{loadProgress || "Loading..."}</div> : null}
             {!loading && filteredEntries.length === 0 ? <div className="empty-state">No entries found.</div> : null}
             {entries.length > 0
           ? filteredEntries.map((entry) => (
@@ -4792,8 +5944,10 @@ function App() {
                 rating={ratings[entry.mediaId]}
                 watchNow={settings.watchNow}
                 alertIconId={settings.appearance.alertIcon}
+                showSynonymSubtitle={settings.appearance.showSynonymSubtitle}
                 showSynonymInfoIcon={settings.appearance.showSynonymInfoIcon}
                 showNotes={showNotes}
+                simplifiedView={simplifiedView}
                 onNoteError={setError}
                 offlineMode={offlineEnabled}
                 onPreviewFocus={openFocusedPreview}
@@ -4807,6 +5961,7 @@ function App() {
           </>
         )}
       </section>
+      {!isAddTab && loadDiagnostics ? <div className="load-diagnostics">{loadDiagnostics}</div> : null}
     </main>
   );
 }
