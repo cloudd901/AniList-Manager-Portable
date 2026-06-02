@@ -1,4 +1,5 @@
 using System.Net;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -235,16 +236,20 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             var watchNowInput = input["watchNow"] as JsonObject;
             var appearanceInput = input["appearance"] as JsonObject;
             var updatesInput = input["updates"] as JsonObject;
+            var advancedFiltersInput = input["advancedFilters"] as JsonObject;
             var showNotes = input.ContainsKey("showNotes")
                 ? JsonUtil.Bool(input, "showNotes") ?? throw new ApiException("Show Notes must be true or false.", 400)
                 : (bool?)null;
-            if (watchNowInput is null && appearanceInput is null && updatesInput is null && showNotes is null)
+            var simplifiedView = input.ContainsKey("simplifiedView")
+                ? JsonUtil.Bool(input, "simplifiedView") ?? throw new ApiException("Simplified View must be true or false.", 400)
+                : (bool?)null;
+            if (watchNowInput is null && appearanceInput is null && updatesInput is null && advancedFiltersInput is null && showNotes is null && simplifiedView is null)
             {
-                throw new ApiException("Provide Appearance, Watch Now, Updates settings, or Show Notes.", 400);
+                throw new ApiException("Provide Appearance, Watch Now, Updates, Advanced Filters settings, Show Notes, or Simplified View.", 400);
             }
-            if (appearanceInput is not null || updatesInput is not null || showNotes.HasValue)
+            if (appearanceInput is not null || updatesInput is not null || advancedFiltersInput is not null || showNotes.HasValue || simplifiedView.HasValue)
             {
-                tokens.SavePublicSettings(appearanceInput, updatesInput, showNotes);
+                tokens.SavePublicSettings(appearanceInput, updatesInput, showNotes, advancedFiltersInput, simplifiedView);
             }
             if (watchNowInput is not null)
             {
@@ -278,6 +283,7 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             }
             await aniList.ViewerAsync(token.Trim(), cancellationToken);
             tokens.SavePortableToken(token.Trim());
+            aniList.ClearListCache();
             var state = await GetAuthStateAsync(cancellationToken);
             state["saved"] = true;
             state["message"] = JsonUtil.String(state, "tokenSource") == "env"
@@ -296,6 +302,7 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             }
             await aniList.ViewerAsync(cliToken, cancellationToken);
             tokens.SavePortableToken(cliToken);
+            aniList.ClearListCache();
             var state = await GetAuthStateAsync(cancellationToken);
             state["imported"] = true;
             state["message"] = JsonUtil.String(state, "tokenSource") == "env"
@@ -312,6 +319,7 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
                 throw new ApiException("The active AniList token comes from ANILIST_TOKEN or ANILIST_ACCESS_TOKEN, so it cannot be removed from this app.", 409);
             }
             tokens.ClearPortableToken();
+            aniList.ClearListCache();
             var auth = await GetAuthStateAsync(cancellationToken);
             auth["removed"] = true;
             auth["message"] = "Logged out. The portable token was removed.";
@@ -351,6 +359,7 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         }
         if (method == "GET" && path == "/api/lists")
         {
+            var requestTimer = Stopwatch.StartNew();
             var query = ParseQuery(context.Request.Url?.Query ?? "");
             var status = NormalizeStatus(query.TryGetValue("status", out var statusValue) ? statusValue : "CURRENT");
             var type = (query.TryGetValue("type", out var typeValue) ? typeValue : "ANIME").ToUpperInvariant();
@@ -360,17 +369,33 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             }
             if (offline.IsEnabled)
             {
-                await SendJsonAsync(context, 200, offline.GetList(status, type).ToJsonString(JsonUtil.WriterOptions));
+                var offlineList = offline.GetList(status, type);
+                offlineList["diagnostics"] = new JsonObject
+                {
+                    ["source"] = "local-offline",
+                    ["localApiMs"] = requestTimer.ElapsedMilliseconds,
+                    ["entryCount"] = JsonUtil.Array(offlineList, "entries").Count,
+                    ["selectedStatus"] = status
+                };
+                await SendJsonAsync(context, 200, offlineList.ToJsonString(JsonUtil.WriterOptions));
                 return;
             }
-            var result = await aniList.GetListEntriesAsync(status, type, cancellationToken);
+            var chunk = query.TryGetValue("chunk", out var chunkValue) && int.TryParse(chunkValue, out var parsedChunk)
+                ? Math.Max(1, parsedChunk)
+                : (int?)null;
+            var perChunk = query.TryGetValue("perChunk", out var perChunkValue) && int.TryParse(perChunkValue, out var parsedPerChunk)
+                ? Math.Clamp(parsedPerChunk, 1, 500)
+                : (int?)null;
+            var result = await aniList.GetListEntriesAsync(status, type, chunk, perChunk, cancellationToken);
+            result.Diagnostics["localApiMs"] = requestTimer.ElapsedMilliseconds;
             await SendJsonAsync(context, 200, new JsonObject
             {
                 ["user"] = result.Viewer.DeepClone(),
                 ["type"] = type,
                 ["status"] = status,
                 ["listName"] = result.ListName,
-                ["entries"] = result.Entries.DeepClone()
+                ["entries"] = result.Entries.DeepClone(),
+                ["diagnostics"] = result.Diagnostics.DeepClone()
             }.ToJsonString(JsonUtil.WriterOptions));
             return;
         }
@@ -386,7 +411,7 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
                 await SendJsonAsync(context, 200, offline.GetAvailability(offlineList["entries"] as JsonArray ?? new JsonArray()).ToJsonString(JsonUtil.WriterOptions));
                 return;
             }
-            var list = await aniList.GetListEntriesAsync(status, type, cancellationToken);
+            var list = await aniList.GetListEntriesAsync(status, type, cancellationToken: cancellationToken);
             var cacheOnly = query.TryGetValue("cacheOnly", out var cacheOnlyValue) && cacheOnlyValue.Equals("true", StringComparison.OrdinalIgnoreCase);
             await SendAvailabilityAsync(context, list.Entries, refresh, false, cacheOnly, false, status, type, cancellationToken);
             return;

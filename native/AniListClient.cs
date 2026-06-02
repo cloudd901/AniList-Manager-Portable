@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -13,7 +14,10 @@ internal sealed class ApiException(string message, int status = 500, JsonNode? d
 internal sealed class AniListClient(HttpClient http, TokenStore tokens)
 {
     private const string GraphQlUrl = "https://graphql.anilist.co";
+    private static readonly TimeSpan ListCacheTtl = TimeSpan.FromMinutes(2);
     private readonly SemaphoreSlim mutationLock = new(1, 1);
+    private readonly object listCacheLock = new();
+    private readonly Dictionary<string, CachedListResult> listCache = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset nextMutationAt = DateTimeOffset.MinValue;
 
     public const string ViewerQuery = """
@@ -28,8 +32,9 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
         """;
 
     private const string ListQuery = """
-        query AnimeLists($userId: Int!, $type: MediaType!) {
-          MediaListCollection(userId: $userId, type: $type, forceSingleCompletedList: true) {
+        query AnimeLists($userId: Int!, $type: MediaType!, $status: MediaListStatus!, $chunk: Int, $perChunk: Int) {
+          MediaListCollection(userId: $userId, type: $type, status: $status, forceSingleCompletedList: true, chunk: $chunk, perChunk: $perChunk) {
+            hasNextChunk
             lists {
               name
               status
@@ -72,6 +77,8 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
           }
         }
         """;
+
+    private sealed record CachedListResult(JsonObject Viewer, string ListName, JsonArray Entries, JsonObject Diagnostics, DateTimeOffset CachedAt);
 
     private const string SaveEntryMutation = """
         mutation SaveEntry($mediaId: Int!, $progress: Int, $status: MediaListStatus, $score: Float) {
@@ -220,26 +227,53 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             request.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
 
-            using var response = await http.SendAsync(request, cancellationToken);
-            var text = await response.Content.ReadAsStringAsync(cancellationToken);
-            var payload = JsonNode.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text) as JsonObject ?? new JsonObject();
-            var errors = payload["errors"] as JsonArray;
-            if (response.IsSuccessStatusCode && errors is not { Count: > 0 })
+            HttpResponseMessage response;
+            try
             {
-                return payload["data"] as JsonObject ?? new JsonObject();
+                response = await http.SendAsync(request, cancellationToken);
             }
-
-            var message = errors is { Count: > 0 }
-                ? string.Join("; ", errors.Select(error => JsonUtil.String(error, "message")).Where(value => !string.IsNullOrWhiteSpace(value)))
-                : $"AniList request failed with {(int)response.StatusCode}";
-            message = string.IsNullOrWhiteSpace(message) ? "AniList request failed." : message;
-            if (IsRateLimited(response, message) && attempt < 4)
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                await Task.Delay(RateLimitDelay(response, attempt), cancellationToken);
-                continue;
+                throw new ApiException("AniList request timed out before the local app received a response.", 504, new JsonObject
+                {
+                    ["source"] = "anilist",
+                    ["endpoint"] = GraphQlUrl,
+                    ["timeoutMs"] = (long)http.Timeout.TotalMilliseconds,
+                    ["attempt"] = attempt + 1
+                });
             }
+            catch (HttpRequestException error)
+            {
+                throw new ApiException("AniList request could not reach the remote API.", 502, new JsonObject
+                {
+                    ["source"] = "anilist",
+                    ["endpoint"] = GraphQlUrl,
+                    ["message"] = error.Message,
+                    ["attempt"] = attempt + 1
+                });
+            }
+            using (response)
+            {
+                var text = await response.Content.ReadAsStringAsync(cancellationToken);
+                var payload = JsonNode.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text) as JsonObject ?? new JsonObject();
+                var errors = payload["errors"] as JsonArray;
+                if (response.IsSuccessStatusCode && errors is not { Count: > 0 })
+                {
+                    return payload["data"] as JsonObject ?? new JsonObject();
+                }
 
-            throw new ApiException(message, (int)response.StatusCode, errors);
+                var message = errors is { Count: > 0 }
+                    ? string.Join("; ", errors.Select(error => JsonUtil.String(error, "message")).Where(value => !string.IsNullOrWhiteSpace(value)))
+                    : $"AniList request failed with {(int)response.StatusCode}";
+                message = string.IsNullOrWhiteSpace(message) ? "AniList request failed." : message;
+                if (IsRateLimited(response, message) && attempt < 4)
+                {
+                    await Task.Delay(RateLimitDelay(response, attempt), cancellationToken);
+                    continue;
+                }
+
+                throw new ApiException(message, (int)response.StatusCode, errors);
+            }
         }
 
         throw new ApiException("AniList request failed after retrying.", 429);
@@ -251,13 +285,37 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
         return (data["Viewer"] as JsonObject)?.DeepClone().AsObject() ?? new JsonObject();
     }
 
-    public async Task<(JsonObject Viewer, string ListName, JsonArray Entries)> GetListEntriesAsync(string status, string type, CancellationToken cancellationToken = default)
+    public async Task<(JsonObject Viewer, string ListName, JsonArray Entries, JsonObject Diagnostics)> GetListEntriesAsync(string status, string type, int? chunk = null, int? perChunk = null, CancellationToken cancellationToken = default)
     {
+        var cacheKey = chunk.HasValue || perChunk.HasValue
+            ? $"{type}:{status}:chunk:{chunk ?? 0}:per:{perChunk ?? 0}"
+            : $"{type}:{status}";
+        if (TryGetCachedList(cacheKey) is { } cached)
+        {
+            return cached;
+        }
+
+        var totalTimer = Stopwatch.StartNew();
+        var viewerTimer = Stopwatch.StartNew();
         var viewerData = await GraphQlAsync(ViewerQuery, cancellationToken: cancellationToken);
+        viewerTimer.Stop();
         var viewer = (viewerData["Viewer"] as JsonObject)?.DeepClone().AsObject() ?? new JsonObject();
         var userId = JsonUtil.Int(viewer, "id") ?? throw new ApiException("AniList viewer id was missing.", 502);
-        var data = await GraphQlAsync(ListQuery, new JsonObject { ["userId"] = userId, ["type"] = type }, cancellationToken: cancellationToken);
-        var lists = data["MediaListCollection"]?["lists"] as JsonArray ?? [];
+        var collectionTimer = Stopwatch.StartNew();
+        var variables = new JsonObject { ["userId"] = userId, ["type"] = type, ["status"] = status };
+        if (chunk.HasValue)
+        {
+            variables["chunk"] = chunk.Value;
+        }
+        if (perChunk.HasValue)
+        {
+            variables["perChunk"] = perChunk.Value;
+        }
+        var data = await GraphQlAsync(ListQuery, variables, cancellationToken: cancellationToken);
+        collectionTimer.Stop();
+        var normalizeTimer = Stopwatch.StartNew();
+        var collection = data["MediaListCollection"] as JsonObject ?? new JsonObject();
+        var lists = collection["lists"] as JsonArray ?? [];
         JsonObject? selectedList = null;
         foreach (var list in lists.OfType<JsonObject>())
         {
@@ -284,7 +342,32 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
             entries.Add(entry);
         }
 
-        return (viewer, JsonUtil.String(selectedList, "name") ?? status, entries);
+        normalizeTimer.Stop();
+        totalTimer.Stop();
+        var diagnostics = new JsonObject
+        {
+            ["source"] = "anilist",
+            ["cacheHit"] = false,
+            ["viewerMs"] = viewerTimer.ElapsedMilliseconds,
+            ["collectionMs"] = collectionTimer.ElapsedMilliseconds,
+            ["remoteMs"] = viewerTimer.ElapsedMilliseconds + collectionTimer.ElapsedMilliseconds,
+            ["localNormalizeMs"] = normalizeTimer.ElapsedMilliseconds,
+            ["totalClientMs"] = totalTimer.ElapsedMilliseconds,
+            ["listCount"] = lists.Count,
+            ["entryCount"] = entries.Count,
+            ["selectedStatus"] = status,
+            ["hasNextChunk"] = JsonUtil.Bool(collection, "hasNextChunk") == true
+        };
+        if (chunk.HasValue)
+        {
+            diagnostics["chunk"] = chunk.Value;
+        }
+        if (perChunk.HasValue)
+        {
+            diagnostics["perChunk"] = perChunk.Value;
+        }
+        StoreCachedList(cacheKey, viewer, JsonUtil.String(selectedList, "name") ?? status, entries, diagnostics);
+        return CloneListResult(viewer, JsonUtil.String(selectedList, "name") ?? status, entries, diagnostics);
     }
 
     public async Task<JsonObject> SearchAnimeAsync(string query, int page, int perPage, CancellationToken cancellationToken = default)
@@ -334,6 +417,7 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
         {
             var data = await GraphQlAsync(notesProvided ? SaveEntryWithNotesMutation : SaveEntryMutation, variables, cancellationToken: cancellationToken);
             var entry = data["SaveMediaListEntry"] as JsonObject ?? throw new ApiException("AniList did not return the updated entry.", 502);
+            ClearListCache();
             return NormalizeEntry(entry);
         }, cancellationToken);
     }
@@ -361,6 +445,7 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
                     entries.Add((JsonNode?)NormalizeEntry(entry));
                 }
             }
+            ClearListCache();
             return entries;
         }, cancellationToken);
     }
@@ -374,9 +459,60 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
             {
                 throw new ApiException("AniList did not confirm the entry was deleted.", 502);
             }
+            ClearListCache();
             return true;
         }, cancellationToken);
     }
+
+    public void ClearListCache()
+    {
+        lock (listCacheLock)
+        {
+            listCache.Clear();
+        }
+    }
+
+    private (JsonObject Viewer, string ListName, JsonArray Entries, JsonObject Diagnostics)? TryGetCachedList(string cacheKey)
+    {
+        lock (listCacheLock)
+        {
+            if (!listCache.TryGetValue(cacheKey, out var cached))
+            {
+                return null;
+            }
+
+            var age = DateTimeOffset.UtcNow - cached.CachedAt;
+            if (age > ListCacheTtl)
+            {
+                listCache.Remove(cacheKey);
+                return null;
+            }
+
+            var diagnostics = cached.Diagnostics.DeepClone().AsObject();
+            diagnostics["cacheHit"] = true;
+            diagnostics["cacheAgeMs"] = (long)age.TotalMilliseconds;
+            diagnostics["remoteMs"] = 0;
+            diagnostics["localNormalizeMs"] = 0;
+            diagnostics["totalClientMs"] = 0;
+            return CloneListResult(cached.Viewer, cached.ListName, cached.Entries, diagnostics);
+        }
+    }
+
+    private void StoreCachedList(string cacheKey, JsonObject viewer, string listName, JsonArray entries, JsonObject diagnostics)
+    {
+        lock (listCacheLock)
+        {
+            listCache[cacheKey] = new CachedListResult(
+                viewer.DeepClone().AsObject(),
+                listName,
+                entries.DeepClone().AsArray(),
+                diagnostics.DeepClone().AsObject(),
+                DateTimeOffset.UtcNow);
+        }
+    }
+
+    private static (JsonObject Viewer, string ListName, JsonArray Entries, JsonObject Diagnostics) CloneListResult(JsonObject viewer, string listName, JsonArray entries, JsonObject diagnostics) =>
+        (viewer.DeepClone().AsObject(), listName, entries.DeepClone().AsArray(), diagnostics.DeepClone().AsObject());
 
     private async Task<T> RunMutationAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken)
     {

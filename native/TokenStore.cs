@@ -15,6 +15,9 @@ internal sealed class TokenStore(AppPaths paths)
     private static readonly HashSet<string> ColorModes = ["light", "soft", "dim", "dark", "system"];
     private static readonly HashSet<string> AccentThemes = ["blue", "teal", "rose"];
     private static readonly HashSet<string> AlertIcons = ["triangle", "beacon", "bolt", "dot", "green-dot"];
+    private static readonly HashSet<string> ListStatuses = ["CURRENT", "PLANNING", "COMPLETED", "PAUSED", "DROPPED", "REPEATING"];
+    private const int MaxSavedFilters = 50;
+    private const int MaxSavedFilterNameLength = 80;
 
     public TokenState Resolve()
     {
@@ -71,17 +74,23 @@ internal sealed class TokenStore(AppPaths paths)
         return new JsonObject
         {
             ["showNotes"] = JsonUtil.Bool(config, "showNotes") ?? JsonUtil.Bool(config, "notesMode") == true,
+            ["simplifiedView"] = JsonUtil.Bool(config, "simplifiedView") ?? false,
             ["appearance"] = PublicAppearance(appearance),
-            ["updates"] = PublicUpdates(config["updates"] as JsonObject)
+            ["updates"] = PublicUpdates(config["updates"] as JsonObject),
+            ["advancedFilters"] = PublicAdvancedFilters(config["advancedFilters"] as JsonObject)
         };
     }
 
-    public JsonObject SavePublicSettings(JsonObject? appearanceInput = null, JsonObject? updatesInput = null, bool? showNotes = null)
+    public JsonObject SavePublicSettings(JsonObject? appearanceInput = null, JsonObject? updatesInput = null, bool? showNotes = null, JsonObject? advancedFiltersInput = null, bool? simplifiedView = null)
     {
         var config = paths.ReadPortableConfig();
         if (showNotes.HasValue)
         {
             config["showNotes"] = showNotes.Value;
+        }
+        if (simplifiedView.HasValue)
+        {
+            config["simplifiedView"] = simplifiedView.Value;
         }
         if (appearanceInput is not null)
         {
@@ -112,6 +121,11 @@ internal sealed class TokenStore(AppPaths paths)
                 currentAppearance["showSynonymInfoIcon"] = JsonUtil.Bool(appearanceInput, "showSynonymInfoIcon")
                     ?? throw new ApiException("Show Synonym Info Icon must be true or false.", 400);
             }
+            if (appearanceInput.ContainsKey("showSynonymSubtitle"))
+            {
+                currentAppearance["showSynonymSubtitle"] = JsonUtil.Bool(appearanceInput, "showSynonymSubtitle")
+                    ?? throw new ApiException("Show Synonym Subtitle must be true or false.", 400);
+            }
             config["appearance"] = currentAppearance;
         }
         if (updatesInput is not null)
@@ -124,6 +138,10 @@ internal sealed class TokenStore(AppPaths paths)
             }
             config["updates"] = currentUpdates;
         }
+        if (advancedFiltersInput is not null)
+        {
+            config["advancedFilters"] = NormalizeAdvancedFilters(advancedFiltersInput, true);
+        }
         config["updatedAt"] = DateTimeOffset.UtcNow.ToString("O");
         paths.WritePortableConfig(config);
         return ReadPublicSettings();
@@ -134,6 +152,7 @@ internal sealed class TokenStore(AppPaths paths)
         ["colorMode"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "colorMode"), ColorModes, "soft"),
         ["accentTheme"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "accentTheme"), AccentThemes, "teal"),
         ["alertIcon"] = NormalizedAppearanceValue(JsonUtil.String(appearance ?? new JsonObject(), "alertIcon"), AlertIcons, "green-dot"),
+        ["showSynonymSubtitle"] = JsonUtil.Bool(appearance ?? new JsonObject(), "showSynonymSubtitle") ?? !(JsonUtil.Bool(appearance ?? new JsonObject(), "hideSynonymSubtitle") ?? false),
         ["showSynonymInfoIcon"] = JsonUtil.Bool(appearance ?? new JsonObject(), "showSynonymInfoIcon") ?? true
     };
 
@@ -141,6 +160,103 @@ internal sealed class TokenStore(AppPaths paths)
     {
         ["autoCheckEnabled"] = JsonUtil.Bool(updates ?? new JsonObject(), "autoCheckEnabled") ?? true
     };
+
+    private static JsonObject PublicAdvancedFilters(JsonObject? advancedFilters)
+    {
+        try
+        {
+            return NormalizeAdvancedFilters(advancedFilters, false);
+        }
+        catch
+        {
+            return EmptyAdvancedFilters();
+        }
+    }
+
+    private static JsonObject EmptyAdvancedFilters() => new()
+    {
+        ["filters"] = new JsonArray(),
+        ["defaultByStatus"] = new JsonObject()
+    };
+
+    private static JsonObject NormalizeAdvancedFilters(JsonObject? input, bool strict)
+    {
+        if (input is null)
+        {
+            return EmptyAdvancedFilters();
+        }
+
+        var filtersInput = JsonUtil.Array(input, "filters");
+        if (strict && filtersInput.Count > MaxSavedFilters)
+        {
+            throw new ApiException($"Saved filters are limited to {MaxSavedFilters}.", 400);
+        }
+
+        var filters = new JsonArray();
+        var seenIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var filterNode in filtersInput.OfType<JsonObject>())
+        {
+            if (filters.Count >= MaxSavedFilters)
+            {
+                break;
+            }
+
+            var id = JsonUtil.String(filterNode, "id")?.Trim();
+            var name = JsonUtil.String(filterNode, "name")?.Trim();
+            var filter = filterNode["filter"] as JsonObject;
+            if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(name) || filter is null)
+            {
+                if (strict)
+                {
+                    throw new ApiException("Each saved filter must include an id, name, and filter object.", 400);
+                }
+                continue;
+            }
+            if (name.Length > MaxSavedFilterNameLength)
+            {
+                if (strict)
+                {
+                    throw new ApiException($"Saved filter names are limited to {MaxSavedFilterNameLength} characters.", 400);
+                }
+                name = name[..MaxSavedFilterNameLength];
+            }
+            if (!seenIds.Add(id))
+            {
+                if (strict)
+                {
+                    throw new ApiException("Saved filter ids must be unique.", 400);
+                }
+                continue;
+            }
+
+            filters.Add((JsonNode?)new JsonObject
+            {
+                ["id"] = id,
+                ["name"] = name,
+                ["filter"] = filter.DeepClone()
+            });
+        }
+
+        var defaultByStatus = new JsonObject();
+        var defaultsInput = input["defaultByStatus"] as JsonObject;
+        if (defaultsInput is not null)
+        {
+            foreach (var status in ListStatuses)
+            {
+                var savedId = JsonUtil.String(defaultsInput, status)?.Trim();
+                if (!string.IsNullOrWhiteSpace(savedId) && seenIds.Contains(savedId))
+                {
+                    defaultByStatus[status] = savedId;
+                }
+            }
+        }
+
+        return new JsonObject
+        {
+            ["filters"] = filters,
+            ["defaultByStatus"] = defaultByStatus
+        };
+    }
 
     private static string NormalizedAppearanceValue(string? value, HashSet<string> allowedValues, string fallback)
     {
