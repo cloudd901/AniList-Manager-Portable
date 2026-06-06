@@ -646,7 +646,7 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
             ["totalEpisodes"] = totalEpisodes,
             ["mediaStatus"] = mediaStatus,
             ["endDate"] = media["endDate"]?.DeepClone(),
-            ["isAiring"] = mediaStatus == "RELEASING" || nextAiring is not null,
+            ["isAiring"] = mediaStatus == "RELEASING",
             ["coverImage"] = JsonUtil.String(cover, "large") ?? JsonUtil.String(cover, "medium"),
             ["coverImageLarge"] = JsonUtil.String(cover, "extraLarge") ?? JsonUtil.String(cover, "large") ?? JsonUtil.String(cover, "medium"),
             ["siteUrl"] = JsonUtil.String(media, "siteUrl")

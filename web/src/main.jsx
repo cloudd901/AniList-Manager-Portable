@@ -5049,9 +5049,6 @@ function App() {
         if (!updatedEntry.nextAiringEpisode && entry.nextAiringEpisode) {
           nextEntry.nextAiringEpisode = entry.nextAiringEpisode;
         }
-        if (entry.isAiring && nextEntry.nextAiringEpisode) {
-          nextEntry.isAiring = true;
-        }
         return nextEntry;
       })
     );

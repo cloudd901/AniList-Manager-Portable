@@ -713,6 +713,11 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
                     }
                 }
 
+                if (availability.SuppressesAutomaticAvailability(entry))
+                {
+                    return null;
+                }
+
                 Interlocked.Increment(ref checkedCount);
                 return await availability.ResolveAsync(entry, refresh, cache, cancellationToken, force);
             }
