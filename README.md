@@ -57,29 +57,32 @@ The release is portable. Unzip it, run `AniListManagerPortable.exe`, and keep th
 
 The app stores user data beside the executable. Do not share the `data` folder if it contains your token.
 
-## Main Features
+## Features
 
-- Browse AniList anime lists by status: Watching, Planning, Completed, Paused, Dropped, and Repeating.
-- Create and delete AniList custom lists, show them as tabs, and manage custom-list membership from rows or bulk actions.
-- Search, filter, and order the active list.
-- Use Advanced Filters for title, notes, status lists, custom lists, availability, progress, score, format, genre, rating, numeric ranges, primary and secondary sort, and saved per-tab filter presets.
-- Use Simplified view to hide secondary row metadata and focus on cover, title, progress, score, notes, and list status.
-- Search AniList from the Add tab, add anime to a chosen list, and optionally filter add-search results by exact title or cached dub availability.
-- Update watched progress, AniList score, and list status.
-- Remove list entries individually or in bulk.
-- Use bulk progress, status, delete, and local note actions for selected rows.
-- Package lists and cover images for Offline Mode, queue list edits while offline, and sync or discard queued edits when returning online.
-- View availability badges with total, subbed, and dubbed episode counts when lookup data is available.
-- Recheck availability for all rows, missing rows, or currently airing rows while reusing permanent high-confidence local cache entries, showing progress, and allowing cancellation.
-- Right-click an availability badge to save local availability overrides.
-- Use local notes mode without writing notes to AniList.
-- Open anime detail links through AniList or a configured Watch Now server and open next-episode links when a Watch URL is available.
-- Right-click title and Watch Now controls to copy entry IDs or switch the server used for a single link.
-- Preview a thumbnail cover with the anime synopsis and genres on hover or keyboard focus, or click it to keep one centered preview open.
-- Show metadata pills for year or airing state, AniList format, and MAL content rating when available.
-- Export filtered rows or all lists as a full CSV file or MyAnimeList import XML.
-- Check GitHub releases from About or Settings and open the release ZIP manually when an update is available.
-- Large lists load in chunks and briefly cache recent AniList list reads; the footer shows local, remote, cached, and entry-count diagnostics for the current list load.
+### Main Features
+
+- Browse, search, filter, and sort AniList anime lists.
+- Manage status lists and custom lists as tabs.
+- Create and delete AniList custom lists from Settings.
+- Add or remove entries from custom lists from each row or with bulk actions.
+- Update watched progress, AniList score, notes, and list status.
+- Add new anime from AniList search.
+- Use Simplified view for a cleaner editing layout.
+
+### Additional Features
+
+- Advanced Filters cover text, status lists, custom lists, availability, progress, score, format, genre, rating, numeric ranges, and saved per-tab presets.
+- Bulk actions can update progress, status, custom lists, local notes, and deletion for selected rows.
+- Sub/Dub availability badges show total, subbed, and dubbed episode counts when lookup data is available.
+- Availability rechecks can target all rows, missing rows, or airing rows, with reusable cache entries, visible progress, and cancellation.
+- Right-click availability badges to manage local episode-count overrides.
+- Local notes mode can keep notes in the portable folder without writing them to AniList.
+- Watch Now links can open configured detail and next-episode URLs.
+- Cover previews show artwork, synopsis, and genres on hover, keyboard focus, or click.
+- Offline Mode packages lists and cover images locally, queues edits, then syncs or discards queued edits when returning online.
+- Export filtered rows or all lists as CSV or MyAnimeList import XML.
+- About and Settings can check GitHub releases and show update details.
+- Large lists load in chunks and show local, remote, cache, and entry-count diagnostics.
 
 ## Tray App
 
@@ -131,6 +134,7 @@ Availability overrides and notes are local to this portable folder. They are not
 Use the sliders button beside the list search box to open Advanced Filters. The dialog can filter by:
 
 - Text across title and notes, title-only text, or notes-only text.
+- Status List and Custom List membership.
 - Availability completeness, progress completeness, dub availability, unwatched availability alerts, local overrides, notes, and score presence.
 - Format, genre, and MAL/Jikan content rating.
 - Numeric comparisons for year, public score, episode count, progress, sub episodes, and dub episodes.
