@@ -45,6 +45,7 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
                 progress
                 score
                 notes
+                updatedAt
                 startedAt { year month day }
                 completedAt { year month day }
                 repeat
@@ -88,6 +89,7 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
             progress
             score
             notes
+            updatedAt
             startedAt { year month day }
             completedAt { year month day }
             repeat
@@ -127,6 +129,7 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
             progress
             score
             notes
+            updatedAt
             startedAt { year month day }
             completedAt { year month day }
             repeat
@@ -154,6 +157,78 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
                 timeUntilAiring
               }
             }
+          }
+        }
+        """;
+
+    private const string SaveEntryFullMutation = """
+        mutation SaveEntryFull($mediaId: Int!, $progress: Int, $status: MediaListStatus, $score: Float, $notes: String, $customLists: [String]) {
+          SaveMediaListEntry(mediaId: $mediaId, progress: $progress, status: $status, score: $score, notes: $notes, customLists: $customLists) {
+            id
+            status
+            progress
+            score
+            notes
+            updatedAt
+            startedAt { year month day }
+            completedAt { year month day }
+            repeat
+            priority
+            customLists
+            media {
+              id
+              idMal
+              episodes
+              status
+              endDate { year month day }
+              seasonYear
+              format
+              isAdult
+              siteUrl
+              averageScore
+              title { romaji english native }
+              description(asHtml: true)
+              genres
+              synonyms
+              coverImage { extraLarge large medium color }
+              nextAiringEpisode {
+                episode
+                airingAt
+                timeUntilAiring
+              }
+            }
+          }
+        }
+        """;
+
+    private const string UserListOptionsQuery = """
+        query UserListOptions {
+          Viewer {
+            mediaListOptions {
+              animeList {
+                customLists
+              }
+            }
+          }
+        }
+        """;
+
+    private const string UpdateCustomListsMutation = """
+        mutation UpdateCustomLists($customLists: [String]) {
+          UpdateUser(animeListOptions: { customLists: $customLists }) {
+            mediaListOptions {
+              animeList {
+                customLists
+              }
+            }
+          }
+        }
+        """;
+
+    private const string DeleteCustomListMutation = """
+        mutation DeleteCustomList($customList: String, $type: MediaType) {
+          DeleteCustomList(customList: $customList, type: $type) {
+            deleted
           }
         }
         """;
@@ -285,6 +360,69 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
         return (data["Viewer"] as JsonObject)?.DeepClone().AsObject() ?? new JsonObject();
     }
 
+    public async Task<JsonArray> CustomListsAsync(CancellationToken cancellationToken = default)
+    {
+        var data = await GraphQlAsync(UserListOptionsQuery, cancellationToken: cancellationToken);
+        return ExtractCustomLists(data["Viewer"] as JsonObject);
+    }
+
+    public async Task<JsonArray> CreateCustomListAsync(string name, string type, CancellationToken cancellationToken = default)
+    {
+        if (!string.Equals(type, "ANIME", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ApiException("Only ANIME lists are supported.", 400);
+        }
+        var normalizedName = ListMetadataStore.NormalizeCustomListName(name);
+        return await RunMutationAsync(async () =>
+        {
+            var existing = await CustomListsAsync(cancellationToken);
+            var next = existing
+                .Select(node => node?.GetValue<string>() ?? "")
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .ToList();
+            if (!next.Contains(normalizedName, StringComparer.OrdinalIgnoreCase))
+            {
+                next.Add(normalizedName);
+            }
+            var variables = new JsonObject { ["customLists"] = ToJsonArray(next) };
+            var data = await GraphQlAsync(UpdateCustomListsMutation, variables, cancellationToken: cancellationToken);
+            ClearListCache();
+            return ExtractCustomLists(data["UpdateUser"] as JsonObject);
+        }, cancellationToken);
+    }
+
+    public async Task<JsonArray> DeleteCustomListAsync(string name, string type, CancellationToken cancellationToken = default)
+    {
+        if (!string.Equals(type, "ANIME", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ApiException("Only ANIME lists are supported.", 400);
+        }
+        var normalizedName = ListMetadataStore.NormalizeCustomListName(name);
+        return await RunMutationAsync(async () =>
+        {
+            var existing = await CustomListsAsync(cancellationToken);
+            var remaining = existing
+                .Select(node => node?.GetValue<string>() ?? "")
+                .Where(value => !string.IsNullOrWhiteSpace(value) && !string.Equals(value, normalizedName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var data = await GraphQlAsync(DeleteCustomListMutation, new JsonObject
+            {
+                ["customList"] = normalizedName,
+                ["type"] = "ANIME"
+            }, cancellationToken: cancellationToken);
+            if (JsonUtil.Bool(data["DeleteCustomList"], "deleted") != true)
+            {
+                throw new ApiException("AniList did not confirm the custom list was deleted.", 502);
+            }
+            var updateData = await GraphQlAsync(UpdateCustomListsMutation, new JsonObject
+            {
+                ["customLists"] = ToJsonArray(remaining)
+            }, cancellationToken: cancellationToken);
+            ClearListCache();
+            return ExtractCustomLists(updateData["UpdateUser"] as JsonObject);
+        }, cancellationToken);
+    }
+
     public async Task<(JsonObject Viewer, string ListName, JsonArray Entries, JsonObject Diagnostics)> GetListEntriesAsync(string status, string type, int? chunk = null, int? perChunk = null, CancellationToken cancellationToken = default)
     {
         var cacheKey = chunk.HasValue || perChunk.HasValue
@@ -393,7 +531,7 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
         };
     }
 
-    public async Task<JsonObject> SaveEntryAsync(int mediaId, int? progress, string? status, double? score = null, string? notes = null, bool notesProvided = false, CancellationToken cancellationToken = default)
+    public async Task<JsonObject> SaveEntryAsync(int mediaId, int? progress, string? status, double? score = null, string? notes = null, bool notesProvided = false, IReadOnlyList<string>? customLists = null, bool customListsProvided = false, CancellationToken cancellationToken = default)
     {
         var variables = new JsonObject { ["mediaId"] = mediaId };
         if (progress.HasValue)
@@ -412,10 +550,24 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
         {
             variables["notes"] = string.IsNullOrWhiteSpace(notes) ? null : notes;
         }
+        if (customListsProvided)
+        {
+            var customListArray = new JsonArray();
+            foreach (var customList in customLists ?? [])
+            {
+                customListArray.Add((JsonNode?)JsonValue.Create(customList));
+            }
+            variables["customLists"] = customListArray;
+        }
 
         return await RunMutationAsync(async () =>
         {
-            var data = await GraphQlAsync(notesProvided ? SaveEntryWithNotesMutation : SaveEntryMutation, variables, cancellationToken: cancellationToken);
+            var mutation = customListsProvided
+                ? SaveEntryFullMutation
+                : notesProvided
+                    ? SaveEntryWithNotesMutation
+                    : SaveEntryMutation;
+            var data = await GraphQlAsync(mutation, variables, cancellationToken: cancellationToken);
             var entry = data["SaveMediaListEntry"] as JsonObject ?? throw new ApiException("AniList did not return the updated entry.", 502);
             ClearListCache();
             return NormalizeEntry(entry);
@@ -514,6 +666,76 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
     private static (JsonObject Viewer, string ListName, JsonArray Entries, JsonObject Diagnostics) CloneListResult(JsonObject viewer, string listName, JsonArray entries, JsonObject diagnostics) =>
         (viewer.DeepClone().AsObject(), listName, entries.DeepClone().AsArray(), diagnostics.DeepClone().AsObject());
 
+    private static JsonArray ExtractCustomLists(JsonObject? source)
+    {
+        var result = new JsonArray();
+        var animeList = source?["mediaListOptions"]?["animeList"] as JsonObject;
+        foreach (var item in animeList?["customLists"] as JsonArray ?? [])
+        {
+            try
+            {
+                result.Add((JsonNode?)JsonValue.Create(ListMetadataStore.NormalizeCustomListName(item?.GetValue<string>())));
+            }
+            catch
+            {
+            }
+        }
+        return result;
+    }
+
+    private static JsonArray NormalizeCustomListMembership(JsonNode? source)
+    {
+        var result = new JsonArray();
+        if (source is JsonArray array)
+        {
+            foreach (var item in array)
+            {
+                AddCustomListMembership(result, item?.GetValue<string>());
+            }
+            return result;
+        }
+
+        if (source is JsonObject map)
+        {
+            foreach (var item in map)
+            {
+                var included = item.Value is null
+                    || item.Value.GetValueKind() == System.Text.Json.JsonValueKind.True
+                    || string.Equals(item.Value.ToString(), "true", StringComparison.OrdinalIgnoreCase);
+                if (included)
+                {
+                    AddCustomListMembership(result, item.Key);
+                }
+            }
+        }
+        return result;
+    }
+
+    private static void AddCustomListMembership(JsonArray result, string? value)
+    {
+        try
+        {
+            var name = ListMetadataStore.NormalizeCustomListName(value);
+            if (!result.Any(item => string.Equals(item?.GetValue<string>(), name, StringComparison.OrdinalIgnoreCase)))
+            {
+                result.Add((JsonNode?)JsonValue.Create(name));
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private static JsonArray ToJsonArray(IEnumerable<string> values)
+    {
+        var result = new JsonArray();
+        foreach (var value in values)
+        {
+            result.Add((JsonNode?)JsonValue.Create(value));
+        }
+        return result;
+    }
+
     private async Task<T> RunMutationAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken)
     {
         await mutationLock.WaitAsync(cancellationToken);
@@ -571,6 +793,7 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
             progress
             score
             notes
+            updatedAt
             startedAt { year month day }
             completedAt { year month day }
             repeat
@@ -626,11 +849,12 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
             ["progress"] = JsonUtil.Int(entry, "progress") ?? 0,
             ["score"] = JsonUtil.Double(entry, "score") ?? 0,
             ["notes"] = JsonUtil.String(entry, "notes") ?? "",
+            ["updatedAt"] = JsonUtil.Int(entry, "updatedAt"),
             ["startedAt"] = entry["startedAt"]?.DeepClone(),
             ["completedAt"] = entry["completedAt"]?.DeepClone(),
             ["repeat"] = JsonUtil.Int(entry, "repeat") ?? 0,
             ["priority"] = JsonUtil.Int(entry, "priority") ?? 0,
-            ["customLists"] = (entry["customLists"] as JsonArray)?.DeepClone() ?? new JsonArray(),
+            ["customLists"] = NormalizeCustomListMembership(entry["customLists"]),
             ["malId"] = JsonUtil.Int(media, "idMal"),
             ["title"] = title,
             ["romajiTitle"] = JsonUtil.String(titleObject, "romaji"),
@@ -646,7 +870,7 @@ internal sealed class AniListClient(HttpClient http, TokenStore tokens)
             ["totalEpisodes"] = totalEpisodes,
             ["mediaStatus"] = mediaStatus,
             ["endDate"] = media["endDate"]?.DeepClone(),
-            ["isAiring"] = mediaStatus == "RELEASING" || nextAiring is not null,
+            ["isAiring"] = mediaStatus == "RELEASING",
             ["coverImage"] = JsonUtil.String(cover, "large") ?? JsonUtil.String(cover, "medium"),
             ["coverImageLarge"] = JsonUtil.String(cover, "extraLarge") ?? JsonUtil.String(cover, "large") ?? JsonUtil.String(cover, "medium"),
             ["siteUrl"] = JsonUtil.String(media, "siteUrl")

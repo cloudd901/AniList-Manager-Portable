@@ -58,8 +58,9 @@ The app stores user data beside the executable. Do not share the `data` folder i
 ## Main Features
 
 - Browse AniList anime lists by status: Watching, Planning, Completed, Paused, Dropped, and Repeating.
+- Create and delete AniList custom lists, show them as tabs, and manage custom-list membership from rows or bulk actions.
 - Search, filter, and order the active list.
-- Use Advanced Filters for title, notes, availability, progress, score, format, genre, rating, numeric ranges, primary and secondary sort, and saved per-tab filter presets.
+- Use Advanced Filters for title, notes, status lists, custom lists, availability, progress, score, format, genre, rating, numeric ranges, primary and secondary sort, and saved per-tab filter presets.
 - Use Simplified view to hide secondary row metadata and focus on cover, title, progress, score, notes, and list status.
 - Search AniList from the Add tab, add anime to a chosen list, and optionally filter add-search results by exact title or cached dub availability.
 - Update watched progress, AniList score, and list status.
@@ -113,6 +114,7 @@ An existing `~\.config\anilist-cli\config.json` token can be imported, but `anil
 Portable data is stored beside the executable:
 
 - `data\config.json`: token, Appearance, update, notes-mode, Simplified view, and saved Advanced Filters settings.
+- `data\list-metadata.json`: custom-list tab visibility, order, default tab, and list counts.
 - `data\availability-cache.json`: cached sub/dub availability lookups.
 - `data\availability-overrides.json`: local manual availability overrides.
 - `data\mal-cache.json`: cached MAL/Jikan metadata, totals, and rating labels.

@@ -9,6 +9,7 @@ internal sealed class AppPaths
         Root = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
         DataDir = Path.Combine(Root, "data");
         ConfigPath = Path.Combine(DataDir, "config.json");
+        ListMetadataPath = Path.Combine(DataDir, "list-metadata.json");
         AvailabilityCachePath = Path.Combine(DataDir, "availability-cache.json");
         AvailabilityOverridesPath = Path.Combine(DataDir, "availability-overrides.json");
         MalCachePath = Path.Combine(DataDir, "mal-cache.json");
@@ -28,6 +29,7 @@ internal sealed class AppPaths
     public string Root { get; }
     public string DataDir { get; }
     public string ConfigPath { get; }
+    public string ListMetadataPath { get; }
     public string AvailabilityCachePath { get; }
     public string AvailabilityOverridesPath { get; }
     public string MalCachePath { get; }

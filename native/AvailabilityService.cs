@@ -139,7 +139,7 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
         }
     }
 
-    public async Task<JsonObject> ResolveAsync(JsonObject entry, bool refresh, JsonObject cache, CancellationToken cancellationToken, bool force = false)
+    public async Task<JsonObject?> ResolveAsync(JsonObject entry, bool refresh, JsonObject cache, CancellationToken cancellationToken, bool force = false)
     {
         var mediaId = JsonUtil.Int(entry, "mediaId") ?? throw new ApiException("Availability entry is missing mediaId.", 400);
         if (TryGetOverrideResult(entry) is { } overrideResult)
@@ -149,6 +149,11 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
                 cache[mediaId.ToString()] = overrideResult.DeepClone();
             }
             return overrideResult;
+        }
+
+        if (IsUnreleased(entry))
+        {
+            return null;
         }
 
         if (!force)
@@ -259,6 +264,11 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
             return overrideResult;
         }
 
+        if (IsUnreleased(entry))
+        {
+            return null;
+        }
+
         lock (cacheLock)
         {
             if (cache[mediaId.Value.ToString()] is not JsonObject cached)
@@ -292,12 +302,22 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
             return overrideResult;
         }
 
+        if (IsUnreleased(entry))
+        {
+            return null;
+        }
+
         lock (cacheLock)
         {
             return cache[mediaId.Value.ToString()] is JsonObject cached
                 ? cached.DeepClone().AsObject()
                 : null;
         }
+    }
+
+    public bool SuppressesAutomaticAvailability(JsonObject entry)
+    {
+        return IsUnreleased(entry) && TryGetOverrideResult(entry) is null;
     }
 
     public JsonObject ErrorResult(JsonObject entry, Exception error)
@@ -807,6 +827,11 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
         return string.Equals(JsonUtil.String(entry, "mediaStatus"), "FINISHED", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsUnreleased(JsonObject entry)
+    {
+        return string.Equals(JsonUtil.String(entry, "mediaStatus"), "NOT_YET_RELEASED", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static JsonObject ApplyCachePolicy(JsonObject entry, JsonObject result)
     {
         var permanent = IsPermanent(entry, result);
@@ -1079,7 +1104,7 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
             var candidateSeason = TitleSeasonNumber(candidateTitle);
             var adjustedScore = querySeason is not null && candidateSeason is null ? score * 0.55 : score;
             var hasTailMatch = HasDistinctiveTailMatch(candidateTitles, candidateTitle);
-            if (querySeason is not null && candidateSeason is null && !hasTailMatch)
+            if (querySeason is not null && candidateSeason is null)
             {
                 candidateIndex += 1;
                 continue;
@@ -1198,6 +1223,11 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
         var match = Regex.Match(normalized, @"\bseason\s*(\d+)\b|\bs(\d+)\b|\b(\d+)(st|nd|rd|th)\b");
         if (!match.Success)
         {
+            var romanMatch = Regex.Match(normalized, @"\b(ii|iii|iv|v|vi|vii|viii|ix|x)\b", RegexOptions.IgnoreCase);
+            if (romanMatch.Success)
+            {
+                return RomanSeasonNumber(romanMatch.Groups[1].Value);
+            }
             var trailingMatch = Regex.Match(normalized, @"\b(\d+)$");
             return trailingMatch.Success ? int.Parse(trailingMatch.Groups[1].Value) : null;
         }
@@ -1210,6 +1240,23 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
             return int.Parse(match.Groups[2].Success ? match.Groups[2].Value : match.Groups[3].Value);
         }
         return null;
+    }
+
+    private static int? RomanSeasonNumber(string value)
+    {
+        return value.ToLowerInvariant() switch
+        {
+            "ii" => 2,
+            "iii" => 3,
+            "iv" => 4,
+            "v" => 5,
+            "vi" => 6,
+            "vii" => 7,
+            "viii" => 8,
+            "ix" => 9,
+            "x" => 10,
+            _ => null
+        };
     }
 
     private static bool IsSeriesFormat(string? format)

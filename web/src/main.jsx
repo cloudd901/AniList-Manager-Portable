@@ -4,7 +4,10 @@ import packageInfo from "../package.json";
 import "./styles.css";
 
 const APP_VERSION = `v${packageInfo.version}`;
+const ALL_STATUS = "ALL";
 const ADD_STATUS = "ADD";
+const CUSTOM_TAB_PREFIX = "CUSTOM:";
+const NO_CUSTOM_LIST_FILTER = "__NO_CUSTOM_LIST__";
 const LIST_STATUSES = [
   { value: "CURRENT", label: "Watching" },
   { value: "PLANNING", label: "Planning" },
@@ -13,7 +16,9 @@ const LIST_STATUSES = [
   { value: "DROPPED", label: "Dropped" },
   { value: "REPEATING", label: "Repeating" }
 ];
-const STATUSES = [...LIST_STATUSES, { value: ADD_STATUS, label: "Add" }];
+const STATUS_VALUES = LIST_STATUSES.map((status) => status.value);
+const STATUS_SORT_RANKS = Object.fromEntries(STATUS_VALUES.map((status, index) => [status, index + 1]));
+const DEFAULT_VISIBLE_TABS = [...STATUS_VALUES, ALL_STATUS];
 const EXPORT_STATUSES = LIST_STATUSES.map((status) => status.value);
 const EXPORT_AVAILABILITY_CHUNK_SIZE = 25;
 const EXPORT_RATING_CHUNK_SIZE = 25;
@@ -45,6 +50,8 @@ const SORT_OPTIONS = [
   { value: "dub", label: "Dub episodes" },
   { value: "personalScore", label: "Personal Score" },
   { value: "publicScore", label: "Public Score" },
+  { value: "statusList", label: "Status List" },
+  { value: "lastModified", label: "Last Modified" },
   { value: "notes", label: "Notes" },
   { value: "rating", label: "Class Rating" }
 ];
@@ -115,7 +122,7 @@ const RATING_SORT_RANKS = {
 const AVAILABILITY_ALERT_STATUSES = new Set(["CURRENT", "PLANNING", "PAUSED", "REPEATING"]);
 
 function defaultSortDirection(field) {
-  return field === "english" || field === "romaji" || field === "notes" ? "asc" : "desc";
+  return field === "english" || field === "romaji" || field === "notes" || field === "statusList" ? "asc" : "desc";
 }
 
 function defaultNumericFilters() {
@@ -128,6 +135,10 @@ function defaultAdvancedFilter() {
     query: "",
     title: "",
     notes: "",
+    statusLists: [],
+    statusListsConfigured: false,
+    customLists: [],
+    customListsConfigured: false,
     completeOnly: false,
     incompleteOnly: false,
     dubOnly: false,
@@ -158,6 +169,226 @@ function normalizeArrayStrings(value, allowedValues = null) {
     .filter((item) => item && (!allowed || allowed.has(item))))];
 }
 
+function isListStatus(value) {
+  return STATUS_VALUES.includes(value);
+}
+
+function normalizeCustomListName(value) {
+  return String(value || "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80);
+}
+
+function customListKey(name) {
+  const normalizedName = normalizeCustomListName(name);
+  return normalizedName ? `${CUSTOM_TAB_PREFIX}${normalizedName}` : "";
+}
+
+function customListNameFromKey(key) {
+  return String(key || "").startsWith(CUSTOM_TAB_PREFIX)
+    ? normalizeCustomListName(String(key).slice(CUSTOM_TAB_PREFIX.length))
+    : "";
+}
+
+function knownCustomKeys(customLists) {
+  return normalizeArrayStrings(customLists).map((name) => customListKey(name)).filter(Boolean);
+}
+
+function normalizeQuickListsMode(value) {
+  return ["full", "hidden"].includes(value) ? value : "mini";
+}
+
+function normalizeTabKey(value, customLists = []) {
+  const key = String(value || "").trim();
+  if (key === ALL_STATUS || isListStatus(key)) {
+    return key;
+  }
+  const customName = customListNameFromKey(key);
+  if (customName) {
+    const knownName = normalizeArrayStrings(customLists).find((name) => name.toLowerCase() === customName.toLowerCase());
+    return knownName ? customListKey(knownName) : "";
+  }
+  return "";
+}
+
+function defaultVisibleTabs(customLists = []) {
+  return [...DEFAULT_VISIBLE_TABS.slice(0, -1), ...knownCustomKeys(customLists), ALL_STATUS];
+}
+
+function defaultTabOrder(customLists = []) {
+  return [...DEFAULT_VISIBLE_TABS.slice(0, -1), ...knownCustomKeys(customLists), ALL_STATUS];
+}
+
+function normalizeListSettings(value, customLists = []) {
+  const allowed = new Set([...DEFAULT_VISIBLE_TABS, ...knownCustomKeys(customLists)]);
+  const configuredOrder = Array.isArray(value?.tabOrder);
+  const orderSource = configuredOrder
+    ? value.tabOrder
+    : Array.isArray(value?.visibleTabs)
+      ? value.visibleTabs
+      : defaultTabOrder(customLists);
+  const tabOrder = [];
+  for (const item of orderSource) {
+    const key = normalizeTabKey(item, customLists);
+    if (key && allowed.has(key) && !tabOrder.includes(key)) {
+      tabOrder.push(key);
+    }
+  }
+  for (const key of defaultTabOrder(customLists)) {
+    if (!tabOrder.includes(key)) {
+      tabOrder.push(key);
+    }
+  }
+  const configuredVisible = Array.isArray(value?.visibleTabs);
+  const source = configuredVisible ? value.visibleTabs : defaultVisibleTabs(customLists);
+  const visibleTabs = [];
+  for (const item of source) {
+    const key = normalizeTabKey(item, customLists);
+    if (key && allowed.has(key) && !visibleTabs.includes(key)) {
+      visibleTabs.push(key);
+    }
+  }
+  if (visibleTabs.length === 0) {
+    visibleTabs.push("CURRENT");
+  }
+  const requestedDefault = normalizeTabKey(value?.defaultTab, customLists);
+  const defaultTab = requestedDefault && visibleTabs.includes(requestedDefault)
+    ? requestedDefault
+    : visibleTabs.includes("CURRENT")
+      ? "CURRENT"
+      : visibleTabs[0];
+  return { visibleTabs, defaultTab, tabOrder };
+}
+
+function defaultListTabs() {
+  const counts = {};
+  const tabs = [
+    ...LIST_STATUSES.map((status) => ({
+      key: status.value,
+      label: status.label,
+      kind: "status",
+      status: status.value,
+      customList: null,
+      count: null
+    })),
+    {
+      key: ALL_STATUS,
+      label: "All",
+      kind: "all",
+      status: null,
+      customList: null,
+      count: null
+    }
+  ];
+  for (const tab of tabs) {
+    counts[tab.key] = null;
+  }
+  return {
+    customLists: [],
+    visibleTabs: defaultVisibleTabs(),
+    defaultTab: "CURRENT",
+    tabOrder: defaultTabOrder(),
+    counts,
+    tabs
+  };
+}
+
+function normalizeListTabs(payload) {
+  const sourceTabs = Array.isArray(payload?.tabs) && payload.tabs.length > 0
+    ? payload.tabs
+    : defaultListTabs().tabs;
+  const customLists = normalizeArrayStrings([
+    ...(Array.isArray(payload?.customLists) ? payload.customLists : []),
+    ...sourceTabs.filter((tab) => tab.kind === "custom").map((tab) => tab.customList || customListNameFromKey(tab.key))
+  ]);
+  const counts = {};
+  const tabs = [];
+  for (const tab of sourceTabs) {
+    const kind = tab.kind === "custom" ? "custom" : tab.kind === "all" ? "all" : "status";
+    const key = kind === "custom"
+      ? customListKey(tab.customList || customListNameFromKey(tab.key))
+      : kind === "all"
+        ? ALL_STATUS
+        : normalizeTabKey(tab.key || tab.status, customLists);
+    if (!key) {
+      continue;
+    }
+    const count = typeof tab.count === "number" ? tab.count : NaN;
+    counts[key] = Number.isFinite(count) && count >= 0 ? count : null;
+    tabs.push({
+      key,
+      label: tab.label || (kind === "custom" ? customListNameFromKey(key) : statusLabel(key)),
+      kind,
+      status: kind === "status" ? key : null,
+      customList: kind === "custom" ? customListNameFromKey(key) : null,
+      count: counts[key]
+    });
+  }
+  const listSettings = normalizeListSettings({
+    visibleTabs: payload?.visibleTabs,
+    defaultTab: payload?.defaultTab,
+    tabOrder: payload?.tabOrder
+  }, customLists);
+  if (payload?.counts && typeof payload.counts === "object") {
+    for (const [key, value] of Object.entries(payload.counts)) {
+      const normalizedKey = normalizeTabKey(key, customLists);
+      if (!normalizedKey) {
+        continue;
+      }
+      const count = typeof value === "number" ? value : NaN;
+      counts[normalizedKey] = Number.isFinite(count) && count >= 0 ? count : null;
+    }
+  }
+  return {
+    customLists,
+    visibleTabs: listSettings.visibleTabs,
+    defaultTab: listSettings.defaultTab,
+    tabOrder: listSettings.tabOrder,
+    counts,
+    tabs
+  };
+}
+
+function listTabByKey(listTabs, key) {
+  return (listTabs?.tabs || []).find((tab) => tab.key === key) || null;
+}
+
+function tabLabel(key, listTabs = defaultListTabs()) {
+  return listTabByKey(listTabs, key)?.label || statusLabel(key);
+}
+
+function visibleMainTabs(settings, listTabs) {
+  const listSettings = normalizeListSettings(settings?.lists, listTabs?.customLists || []);
+  const visible = new Set(listSettings.visibleTabs);
+  const tabs = listTabs?.tabs?.length ? listTabs.tabs : defaultListTabs().tabs;
+  const tabByKey = new Map(tabs.map((tab) => [tab.key, tab]));
+  return [
+    ...listSettings.tabOrder
+      .filter((key) => visible.has(key))
+      .map((key) => tabByKey.get(key) || { key, label: tabLabel(key, listTabs), kind: isListStatus(key) ? "status" : key === ALL_STATUS ? "all" : "custom" }),
+    { key: ADD_STATUS, label: "Add", kind: "add" }
+  ];
+}
+
+function formatListCount(count) {
+  return typeof count === "number" && Number.isFinite(count) && count >= 0 ? String(count) : "--";
+}
+
+function sameStringArray(a = [], b = []) {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function sameCounts(a = {}, b = {}) {
+  const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])];
+  return keys.every((key) => (a[key] ?? null) === (b[key] ?? null));
+}
+
+function sameListTabs(a, b) {
+  return sameStringArray(a?.customLists || [], b?.customLists || [])
+    && sameStringArray(a?.visibleTabs || [], b?.visibleTabs || [])
+    && sameStringArray(a?.tabOrder || [], b?.tabOrder || [])
+    && (a?.defaultTab || "") === (b?.defaultTab || "")
+    && sameCounts(a?.counts || {}, b?.counts || {});
+}
+
 function normalizeNumericFilters(input) {
   const normalized = defaultNumericFilters();
   for (const field of NUMERIC_FILTER_FIELDS) {
@@ -167,6 +398,10 @@ function normalizeNumericFilters(input) {
     normalized[field.value] = { operator, value };
   }
   return normalized;
+}
+
+function normalizedCustomListFilterValues(value) {
+  return normalizeArrayStrings(value).map(normalizeCustomListName).filter(Boolean);
 }
 
 function normalizeAdvancedFilter(filter) {
@@ -188,6 +423,10 @@ function normalizeAdvancedFilter(filter) {
     query: String(filter?.query || ""),
     title: String(filter?.title || ""),
     notes: String(filter?.notes || ""),
+    statusLists: normalizeArrayStrings(filter?.statusLists, STATUS_VALUES),
+    statusListsConfigured: filter?.statusListsConfigured === true,
+    customLists: normalizedCustomListFilterValues(filter?.customLists),
+    customListsConfigured: filter?.customListsConfigured === true,
     completeOnly,
     incompleteOnly: !completeOnly && filter?.incompleteOnly === true,
     dubOnly: filter?.dubOnly === true,
@@ -211,28 +450,83 @@ function normalizeAdvancedFilter(filter) {
   };
 }
 
-function normalizeAdvancedFilters(value) {
+function canUseAdvancedFilterDefaultForTab(tabKey, customLists = []) {
+  return isListStatus(tabKey) || knownCustomKeys(customLists).includes(tabKey);
+}
+
+function advancedFilterListTypeForTab(tabKey) {
+  if (customListNameFromKey(tabKey)) {
+    return "custom";
+  }
+  return tabKey === ALL_STATUS || isListStatus(tabKey) ? "status" : "";
+}
+
+function quickListsModeTabKeys(customLists = []) {
+  return [...STATUS_VALUES, ...knownCustomKeys(customLists), ALL_STATUS];
+}
+
+function defaultSimplifiedQuickListsModeByTab(customLists = []) {
+  return Object.fromEntries(quickListsModeTabKeys(customLists).map((key) => [key, "hidden"]));
+}
+
+function normalizeQuickListsModeByTab(value, customLists = []) {
+  const modes = {};
+  const allowedKeys = new Set(quickListsModeTabKeys(customLists));
+  for (const [rawKey, rawMode] of Object.entries(value || {})) {
+    const key = normalizeTabKey(rawKey, customLists);
+    if (!key || !allowedKeys.has(key)) {
+      continue;
+    }
+    modes[key] = normalizeQuickListsMode(rawMode);
+  }
+  return modes;
+}
+
+function quickListsModeForTab(settings, activeTabKey, customLists = [], simplifiedOverrides = null) {
+  if (settings?.simplifiedView === true) {
+    return normalizeQuickListsMode(simplifiedOverrides?.[activeTabKey] || "hidden");
+  }
+  return normalizeQuickListsMode(settings?.quickListsModeByTab?.[activeTabKey] || settings?.quickListsMode);
+}
+
+function normalizeAdvancedFilterListType(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized === "status" || normalized === "custom" ? normalized : "";
+}
+
+function savedFilterMatchesListType(savedFilter, listType) {
+  const savedListType = normalizeAdvancedFilterListType(savedFilter?.listType);
+  return !savedListType || savedListType === listType;
+}
+
+function normalizeAdvancedFilters(value, customLists = []) {
   const filters = [];
   const seenIds = new Set();
   for (const savedFilter of Array.isArray(value?.filters) ? value.filters : []) {
     const id = String(savedFilter?.id || "").trim();
     const name = String(savedFilter?.name || "").trim().slice(0, 80);
+    const listType = normalizeAdvancedFilterListType(savedFilter?.listType);
     if (!id || !name || seenIds.has(id)) {
       continue;
     }
     seenIds.add(id);
-    filters.push({
+    const normalizedSavedFilter = {
       id,
       name,
       filter: normalizeAdvancedFilter(savedFilter.filter)
-    });
+    };
+    if (listType) {
+      normalizedSavedFilter.listType = listType;
+    }
+    filters.push(normalizedSavedFilter);
   }
 
   const defaultByStatus = {};
-  for (const status of LIST_STATUSES) {
-    const savedId = String(value?.defaultByStatus?.[status.value] || "").trim();
+  const allowedDefaultKeys = [...STATUS_VALUES, ...knownCustomKeys(customLists)];
+  for (const key of allowedDefaultKeys) {
+    const savedId = String(value?.defaultByStatus?.[key] || "").trim();
     if (savedId && seenIds.has(savedId)) {
-      defaultByStatus[status.value] = savedId;
+      defaultByStatus[key] = savedId;
     }
   }
 
@@ -243,6 +537,9 @@ function defaultSettings() {
   return {
     showNotes: false,
     simplifiedView: false,
+    quickListsMode: "mini",
+    quickListsModeByTab: {},
+    lists: normalizeListSettings(),
     advancedFilters: normalizeAdvancedFilters(),
     appearance: {
       colorMode: "soft",
@@ -265,14 +562,17 @@ function defaultSettings() {
   };
 }
 
-function normalizeSettings(settings) {
+function normalizeSettings(settings, customLists = []) {
   const watchNow = settings?.watchNow || {};
   const appearance = settings?.appearance || {};
   const updates = settings?.updates || {};
   return {
     showNotes: settings?.showNotes === true,
     simplifiedView: settings?.simplifiedView === true,
-    advancedFilters: normalizeAdvancedFilters(settings?.advancedFilters),
+    quickListsMode: normalizeQuickListsMode(settings?.quickListsMode),
+    quickListsModeByTab: normalizeQuickListsModeByTab(settings?.quickListsModeByTab, customLists),
+    lists: normalizeListSettings(settings?.lists, customLists),
+    advancedFilters: normalizeAdvancedFilters(settings?.advancedFilters, customLists),
     appearance: {
       colorMode: COLOR_MODES.some((mode) => mode.value === appearance.colorMode) ? appearance.colorMode : "soft",
       accentTheme: ACCENT_THEMES.some((theme) => theme.value === appearance.accentTheme) ? appearance.accentTheme : "teal",
@@ -433,6 +733,7 @@ function exportEntry(entry, metadata = {}) {
     priority: Number(entry.priority) || 0,
     malPriority: malPriority(entry.priority),
     customLists: (entry.customLists || []).filter(Boolean),
+    updatedAt: Number.isFinite(Number(entry.updatedAt)) && Number(entry.updatedAt) > 0 ? Number(entry.updatedAt) : null,
     rewatching,
     rewatchingEpisodes: rewatching ? Math.max(0, Number(entry.progress) || 0) : 0,
     siteUrl: entry.siteUrl,
@@ -591,6 +892,13 @@ function ratingClass(label) {
 }
 
 function statusLabel(value) {
+  if (value === ALL_STATUS) {
+    return "All";
+  }
+  const customName = customListNameFromKey(value);
+  if (customName) {
+    return customName;
+  }
   return LIST_STATUSES.find((status) => status.value === value)?.label || value || "";
 }
 
@@ -1222,13 +1530,105 @@ function NoteControl({ entry, onUpdate, onError }) {
   );
 }
 
-function ListStatusControl({ entry, activeStatus, moving, deleting, onMove }) {
+function CustomListMembershipControl({ entry, customLists, activeCustomList, disabled, mode, onChange }) {
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const manualSelectionKeyRef = useRef("");
+  const entryLists = new Set((entry.customLists || []).map((name) => String(name).toLowerCase()));
+  const normalizedCustomLists = customLists.map((name) => String(name).toLowerCase());
+  const entryListsKey = [...entryLists].sort().join("\u001f");
+  const customListsKey = normalizedCustomLists.join("\u001f");
+  const activeCustomListKey = String(activeCustomList || "").toLowerCase();
+  const selectionDataKey = `${entry.mediaId || ""}:${customListsKey}:${entryListsKey}:${activeCustomListKey}`;
+  const activeCustomListIndex = activeCustomListKey ? normalizedCustomLists.findIndex((name) => name === activeCustomListKey) : -1;
+  const firstCheckedIndex = normalizedCustomLists.findIndex((name) => entryLists.has(name));
+  const preferredSelectedIndex = activeCustomListIndex >= 0 && entryLists.has(activeCustomListKey)
+    ? activeCustomListIndex
+    : firstCheckedIndex >= 0
+      ? firstCheckedIndex
+      : 0;
+
+  useEffect(() => {
+    if (!customLists.length) {
+      if (selectedIndex !== 0) {
+        setSelectedIndex(0);
+      }
+      return;
+    }
+    if (selectedIndex >= customLists.length) {
+      setSelectedIndex(Math.max(0, customLists.length - 1));
+      return;
+    }
+    if (manualSelectionKeyRef.current !== selectionDataKey && preferredSelectedIndex !== selectedIndex) {
+      setSelectedIndex(preferredSelectedIndex);
+    }
+    manualSelectionKeyRef.current = selectionDataKey;
+  }, [customLists.length, preferredSelectedIndex, selectedIndex, selectionDataKey]);
+
+  if (!customLists.length) {
+    return null;
+  }
+  if (mode === "full") {
+    return (
+      <div className="custom-list-options">
+        {customLists.map((name) => {
+          const checked = entryLists.has(name.toLowerCase());
+          return (
+            <label className="custom-list-option" title={checked ? `Remove from ${name}.` : `Add to ${name}.`} key={name}>
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={disabled}
+                onChange={(event) => onChange(name, event.target.checked)}
+              />
+              <span className={activeCustomList && name.toLowerCase() === activeCustomList.toLowerCase() ? "active-custom-list-name" : ""}>{name}</span>
+            </label>
+          );
+        })}
+      </div>
+    );
+  }
+
+  const selectedName = customLists[selectedIndex] || customLists[0];
+  const checked = entryLists.has(selectedName.toLowerCase());
+  const customListNavigationDisabled = Boolean(activeCustomList);
+  const previousCustomList = () => {
+    manualSelectionKeyRef.current = selectionDataKey;
+    setSelectedIndex((index) => (index <= 0 ? customLists.length - 1 : index - 1));
+  };
+  const nextCustomList = () => {
+    manualSelectionKeyRef.current = selectionDataKey;
+    setSelectedIndex((index) => (index >= customLists.length - 1 ? 0 : index + 1));
+  };
   return (
-    <label className="row-control list-control">
-      <span>List</span>
+    <div className="custom-list-stepper">
+      <label className="custom-list-option" title={checked ? `Remove from ${selectedName}.` : `Add to ${selectedName}.`}>
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={disabled}
+          onChange={(event) => onChange(selectedName, event.target.checked)}
+        />
+        <span className={activeCustomList && selectedName.toLowerCase() === activeCustomList.toLowerCase() ? "active-custom-list-name" : ""}>{selectedName}</span>
+      </label>
+      <div className="custom-list-arrows">
+        <button type="button" className="custom-list-arrow" disabled={disabled || customListNavigationDisabled || customLists.length <= 1} onClick={previousCustomList} aria-label="Previous custom list" title="Previous custom list">
+          ▲
+        </button>
+        <button type="button" className="custom-list-arrow" disabled={disabled || customListNavigationDisabled || customLists.length <= 1} onClick={nextCustomList} aria-label="Next custom list" title="Next custom list">
+          ▼
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function QuickListsControl({ entry, customLists, activeCustomList, moving, deleting, customSaving, offlineMode, quickListsMode, onMove, onCustomListChange, onQuickListsMenu }) {
+  return (
+    <fieldset className="row-control quick-lists-control list-control" onContextMenu={onQuickListsMenu}>
+      <legend>Lists</legend>
       <select
         className="status-select"
-        value={activeStatus}
+        value={entry.status || "PLANNING"}
         disabled={moving || deleting}
         onChange={(event) => onMove(event.target.value)}
         aria-label={`Move ${entry.title}`}
@@ -1240,7 +1640,17 @@ function ListStatusControl({ entry, activeStatus, moving, deleting, onMove }) {
         ))}
         <option value="__REMOVE__">Remove from list</option>
       </select>
-    </label>
+      {quickListsMode !== "hidden" ? (
+        <CustomListMembershipControl
+          entry={entry}
+          customLists={customLists}
+          activeCustomList={activeCustomList}
+          disabled={moving || deleting || customSaving || offlineMode}
+          mode={quickListsMode}
+          onChange={onCustomListChange}
+        />
+      ) : null}
+    </fieldset>
   );
 }
 
@@ -1392,14 +1802,21 @@ function entryMatchesAdvancedFilter(entry, context) {
   const normalizedNotes = filter.notes.trim().toLowerCase();
   const notes = String(entry.notes || "");
   const titles = [entry.title, entry.romajiTitle, entry.englishTitle, entry.nativeTitle].filter(Boolean).map((value) => String(value).toLowerCase());
+  const customFilter = new Set(filter.customLists.map((name) => name.toLowerCase()));
+  const entryCustomLists = normalizedCustomListFilterValues(entry.customLists).map((name) => name.toLowerCase());
 
+  const matchesStatusLists = !filter.statusListsConfigured || filter.statusLists.includes(entry.status);
+  const matchesCustomLists = !filter.customListsConfigured
+    || (entryCustomLists.length === 0 && customFilter.has(NO_CUSTOM_LIST_FILTER.toLowerCase()))
+    || entryCustomLists.some((name) => customFilter.has(name));
   const matchesQuery = !normalizedQuery || [...titles, notes.toLowerCase()].some((value) => value.includes(normalizedQuery));
   const matchesTitle = !normalizedTitle || titles.some((value) => value.includes(normalizedTitle));
   const matchesNotes = !normalizedNotes || notes.toLowerCase().includes(normalizedNotes);
   const matchesComplete = !filter.completeOnly || isAvailabilityComplete(availability);
   const matchesIncomplete = !filter.incompleteOnly || isAvailabilityIncomplete(availability);
   const matchesDub = !filter.dubOnly || Number(availability.dubEpisodes || 0) > 0;
-  const matchesUnwatchedAlert = !filter.unwatchedAlertOnly || Boolean(availabilityAlertState(entry, availability, context.activeStatus, context.watchNow).label);
+  const alertStatus = isListStatus(context.activeStatus) ? context.activeStatus : entry.status;
+  const matchesUnwatchedAlert = !filter.unwatchedAlertOnly || Boolean(availabilityAlertState(entry, availability, alertStatus, context.watchNow).label);
   const totalEpisodes = knownEpisodeTotal(entry, availability);
   const matchesProgressComplete = !filter.progressCompleteOnly || (Number.isFinite(totalEpisodes) && totalEpisodes > 0 && Number(entry.progress) >= totalEpisodes);
   const matchesProgressIncomplete = !filter.progressIncompleteOnly || (Number.isFinite(totalEpisodes) && totalEpisodes > 0 && Number(entry.progress) < totalEpisodes);
@@ -1417,6 +1834,8 @@ function entryMatchesAdvancedFilter(entry, context) {
   const matchesNumeric = NUMERIC_FILTER_FIELDS.every((field) => matchesNumericFilter(numericFilterValue(field.value, entry, availability), filter.numeric[field.value]));
 
   return matchesQuery
+    && matchesStatusLists
+    && matchesCustomLists
     && matchesTitle
     && matchesNotes
     && matchesComplete
@@ -1488,6 +1907,16 @@ function compareEntriesBySortField(a, b, field, direction, context) {
     const ratingB = RATING_SORT_RANKS[context.ratings?.[b.mediaId]?.ratingLabel || ""] || null;
     return compareNumberValues(ratingA, ratingB, direction);
   }
+  if (field === "statusList") {
+    const statusA = STATUS_SORT_RANKS[a.status] || null;
+    const statusB = STATUS_SORT_RANKS[b.status] || null;
+    return compareNumberValues(statusA, statusB, direction);
+  }
+  if (field === "lastModified") {
+    const modifiedA = Number(a.updatedAt);
+    const modifiedB = Number(b.updatedAt);
+    return compareNumberValues(Number.isFinite(modifiedA) && modifiedA > 0 ? modifiedA : null, Number.isFinite(modifiedB) && modifiedB > 0 ? modifiedB : null, direction);
+  }
   if (field === "total") {
     return compareNumberValues(knownEpisodeTotal(a, availabilityA), knownEpisodeTotal(b, availabilityB), direction);
   }
@@ -1556,12 +1985,22 @@ function availableRatingOptions(entries, ratings) {
     });
 }
 
-function advancedFilterHasActiveCriteria(filter) {
+function advancedFilterHasActiveCriteria(filter, context = {}) {
   const normalized = normalizeAdvancedFilter(filter);
+  const customLists = normalizedCustomListFilterValues(context.customLists);
+  const statusFilterActive = (context.showStatusLists !== false)
+    && normalized.statusListsConfigured
+    && normalized.statusLists.length < STATUS_VALUES.length;
+  const customFilterActive = (context.showCustomLists !== false)
+    && customLists.length > 0
+    && normalized.customListsConfigured
+    && normalized.customLists.length < customLists.length;
   return Boolean(
     normalized.query.trim()
     || normalized.title.trim()
     || normalized.notes.trim()
+    || statusFilterActive
+    || customFilterActive
     || normalized.completeOnly
     || normalized.incompleteOnly
     || normalized.dubOnly
@@ -1776,20 +2215,25 @@ function AvailabilityAlertIcon({ label, iconId = ALERT_ICON_OPTIONS[0].value }) 
   );
 }
 
-function AvailabilityBadge({ entry, availability, activeStatus, watchNow, alertIconId, onEdit }) {
-  function editOverride(event) {
+function AvailabilityBadge({ entry, availability, activeStatus, watchNow, alertIconId, onMenu }) {
+  function openAvailabilityMenu(event) {
     event.preventDefault();
-    onEdit?.(entry, availability);
+    event.stopPropagation();
+    onMenu?.({
+      ...linkMenuPosition(event, 190, 48),
+      entry,
+      availability
+    });
   }
 
   if (!availability) {
-    return <span className="availability-badge muted" onContextMenu={editOverride}>Sub/Dub ...</span>;
+    return <span className="availability-badge muted" onContextMenu={openAvailabilityMenu}>Sub/Dub ...</span>;
   }
   if (availability.status === "not_found") {
-    return <span className="availability-badge muted" onContextMenu={editOverride}>Sub/Dub n/a</span>;
+    return <span className="availability-badge muted" onContextMenu={openAvailabilityMenu}>Sub/Dub n/a</span>;
   }
   if (availability.status === "error") {
-    return <span className="availability-badge warning" onContextMenu={editOverride}>Sub/Dub error</span>;
+    return <span className="availability-badge warning" onContextMenu={openAvailabilityMenu}>Sub/Dub error</span>;
   }
 
   const total = availability.totalEpisodes ?? "?";
@@ -1828,7 +2272,7 @@ function AvailabilityBadge({ entry, availability, activeStatus, watchNow, alertI
           hasCountOverride ? "override" : ""
         ].filter(Boolean).join(" ")}
         title={title}
-        onContextMenu={editOverride}
+        onContextMenu={openAvailabilityMenu}
       >
         [{total}] Sub {availability.subEpisodes ?? "?"}
         {hasDub ? ` / Dub ${availability.dubEpisodes}` : ""}
@@ -2125,25 +2569,49 @@ function AvailabilityOverrideDialog({ overrideTarget, onClose, onSave, onRemove 
   );
 }
 
-function RowTitleMenu({ menu, onClose }) {
+function useDismissableMenu(menu, onClose) {
   useEffect(() => {
     if (!menu) {
       return undefined;
     }
+
     function closeOnKey(event) {
       if (event.key === "Escape") {
         onClose();
       }
     }
+
     window.addEventListener("click", onClose);
+    window.addEventListener("contextmenu", onClose);
     window.addEventListener("scroll", onClose, true);
     window.addEventListener("keydown", closeOnKey);
+
     return () => {
       window.removeEventListener("click", onClose);
+      window.removeEventListener("contextmenu", onClose);
       window.removeEventListener("scroll", onClose, true);
       window.removeEventListener("keydown", closeOnKey);
     };
   }, [menu, onClose]);
+}
+
+function ContextMenuSurface({ menu, className, ariaLabel, children }) {
+  return (
+    <div
+      className={className}
+      style={{ left: menu.x, top: menu.y }}
+      onClick={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.stopPropagation()}
+      role="menu"
+      aria-label={ariaLabel}
+    >
+      {children}
+    </div>
+  );
+}
+
+function RowTitleMenu({ menu, onClose }) {
+  useDismissableMenu(menu, onClose);
 
   if (!menu) {
     return null;
@@ -2155,13 +2623,7 @@ function RowTitleMenu({ menu, onClose }) {
   }
 
   return (
-    <div
-      className="row-title-menu"
-      style={{ left: menu.x, top: menu.y }}
-      onClick={(event) => event.stopPropagation()}
-      role="menu"
-      aria-label={`Copy details for ${menu.entry.title}`}
-    >
+    <ContextMenuSurface menu={menu} className="row-title-menu" ariaLabel={`Copy details for ${menu.entry.title}`}>
       <button type="button" role="menuitem" onClick={() => copyValue(menu.entry.title)}>
         Copy Name
       </button>
@@ -2171,29 +2633,12 @@ function RowTitleMenu({ menu, onClose }) {
       <button type="button" role="menuitem" disabled={!menu.entry.malId} onClick={() => copyValue(menu.entry.malId)}>
         Copy MAL ID
       </button>
-    </div>
+    </ContextMenuSurface>
   );
 }
 
 function WatchServerMenu({ menu, onClose }) {
-  useEffect(() => {
-    if (!menu) {
-      return undefined;
-    }
-    function closeOnKey(event) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-    window.addEventListener("click", onClose);
-    window.addEventListener("scroll", onClose, true);
-    window.addEventListener("keydown", closeOnKey);
-    return () => {
-      window.removeEventListener("click", onClose);
-      window.removeEventListener("scroll", onClose, true);
-      window.removeEventListener("keydown", closeOnKey);
-    };
-  }, [menu, onClose]);
+  useDismissableMenu(menu, onClose);
 
   if (!menu) {
     return null;
@@ -2208,13 +2653,7 @@ function WatchServerMenu({ menu, onClose }) {
   }
 
   return (
-    <div
-      className="watch-server-menu"
-      style={{ left: menu.x, top: menu.y }}
-      onClick={(event) => event.stopPropagation()}
-      role="menu"
-      aria-label={menu.label}
-    >
+    <ContextMenuSurface menu={menu} className="watch-server-menu" ariaLabel={menu.label}>
       <strong>{menu.label}</strong>
       {menu.options.map((option) => (
         <button
@@ -2230,29 +2669,12 @@ function WatchServerMenu({ menu, onClose }) {
           {option.active ? <small>Active</small> : null}
         </button>
       ))}
-    </div>
+    </ContextMenuSurface>
   );
 }
 
 function AdvancedFilterMenu({ menu, onClose, onClear }) {
-  useEffect(() => {
-    if (!menu) {
-      return undefined;
-    }
-    function closeOnKey(event) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-    window.addEventListener("click", onClose);
-    window.addEventListener("scroll", onClose, true);
-    window.addEventListener("keydown", closeOnKey);
-    return () => {
-      window.removeEventListener("click", onClose);
-      window.removeEventListener("scroll", onClose, true);
-      window.removeEventListener("keydown", closeOnKey);
-    };
-  }, [menu, onClose]);
+  useDismissableMenu(menu, onClose);
 
   if (!menu) {
     return null;
@@ -2264,17 +2686,66 @@ function AdvancedFilterMenu({ menu, onClose, onClear }) {
   }
 
   return (
-    <div
-      className="row-title-menu"
-      style={{ left: menu.x, top: menu.y }}
-      onClick={(event) => event.stopPropagation()}
-      role="menu"
-      aria-label="Advanced filter actions"
-    >
+    <ContextMenuSurface menu={menu} className="row-title-menu" ariaLabel="Advanced filter actions">
       <button type="button" role="menuitem" onClick={clearFilter}>
         Clear Filter
       </button>
-    </div>
+    </ContextMenuSurface>
+  );
+}
+
+function AvailabilityActionMenu({ menu, onClose, onOverride }) {
+  useDismissableMenu(menu, onClose);
+
+  if (!menu) {
+    return null;
+  }
+
+  function overrideEpisodeCounts() {
+    onOverride(menu.entry, menu.availability);
+    onClose();
+  }
+
+  return (
+    <ContextMenuSurface menu={menu} className="row-title-menu" ariaLabel={`Availability actions for ${menu.entry.title}`}>
+      <button type="button" role="menuitem" onClick={overrideEpisodeCounts}>
+        Override Episode Counts
+      </button>
+    </ContextMenuSurface>
+  );
+}
+
+function QuickListsModeMenu({ menu, onClose, onModeChange }) {
+  useDismissableMenu(menu, onClose);
+
+  if (!menu) {
+    return null;
+  }
+
+  function setMode(mode) {
+    onModeChange(mode);
+    onClose();
+  }
+  const mode = menu.mode === "full" || menu.mode === "hidden" ? menu.mode : "mini";
+
+  return (
+    <ContextMenuSurface menu={menu} className="row-title-menu" ariaLabel="Quick Lists display">
+      {mode !== "hidden" ? (
+        <button type="button" role="menuitem" onClick={() => setMode("hidden")}>
+          Hide Custom List
+        </button>
+      ) : null}
+      {mode !== "full" ? (
+        <button type="button" role="menuitem" onClick={() => setMode("full")}>
+          Show Full Custom List
+        </button>
+      ) : null}
+      {mode !== "mini" ? (
+        <button type="button" role="menuitem" onClick={() => setMode("mini")}>
+          Show Mini Custom List
+        </button>
+      ) : null}
+    </ContextMenuSurface>
   );
 }
 
@@ -2464,21 +2935,23 @@ function hasHiddenSynonymSubtitle(entry, showSynonymSubtitle) {
   return Boolean(subtitle && synonyms.length > 0);
 }
 
-function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activeStatus, availability, rating, watchNow, alertIconId, showSynonymSubtitle, showSynonymInfoIcon, onRefreshNeeded, onAvailabilityOverride, onPreviewFocus, previewFocused, showNotes, simplifiedView, onNoteError, offlineMode, onOpenWatchServerMenu }) {
+function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activeStatus, customLists, activeCustomList, availability, rating, watchNow, alertIconId, showSynonymSubtitle, showSynonymInfoIcon, onRefreshNeeded, onAvailabilityMenu, onPreviewFocus, previewFocused, showNotes, simplifiedView, quickListsMode, onNoteError, offlineMode, onOpenTitleMenu, onOpenWatchServerMenu, onQuickListsMenu }) {
   const [moving, setMoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [titleMenu, setTitleMenu] = useState(null);
+  const [customSaving, setCustomSaving] = useState(false);
   const year = entryYear(entry);
+  const rowStatus = isListStatus(activeStatus) ? activeStatus : entry.status;
   const metaIsAiring = entry.isAiring || availability?.forceAiring === true;
   const forcedMetaAiring = availability?.forceAiring === true || availability?.forceComplete === true;
   const mediaFormat = formatLabel(entry.format);
   const detailsLink = detailsUrl(watchNow, entry);
-  const episodeLink = activeStatus === "CURRENT" ? nextEpisodeUrl(watchNow, entry) : watchNowUrl(watchNow, entry);
+  const episodeLink = rowStatus === "CURRENT" ? nextEpisodeUrl(watchNow, entry) : watchNowUrl(watchNow, entry);
   const publicScore = formatPublicScore(entry.publicScore);
 
   function openTitleMenu(event) {
     event.preventDefault();
-    setTitleMenu({
+    event.stopPropagation();
+    onOpenTitleMenu({
       entry,
       x: Math.min(event.clientX, window.innerWidth - 180),
       y: Math.min(event.clientY, window.innerHeight - 132)
@@ -2498,7 +2971,7 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
   function openEpisodeServerMenu(event) {
     event.preventDefault();
     event.stopPropagation();
-    const isNextEpisode = activeStatus === "CURRENT";
+    const isNextEpisode = rowStatus === "CURRENT";
     onOpenWatchServerMenu({
       ...linkMenuPosition(event),
       label: isNextEpisode ? "Open Next Episode With" : "Open Watch Now With",
@@ -2511,7 +2984,7 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
       await deleteEntry();
       return;
     }
-    if (status === activeStatus) {
+    if (status === entry.status) {
       return;
     }
     setMoving(true);
@@ -2520,9 +2993,40 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
         method: "PATCH",
         body: JSON.stringify({ status })
       });
-      onUpdate(payload.entry, { removeFromCurrent: true });
+      onUpdate(payload.entry, {
+        previousEntry: entry,
+        removeFromCurrent: isListStatus(activeStatus) && status !== activeStatus
+      });
     } finally {
       setMoving(false);
+    }
+  }
+
+  async function updateCustomListMembership(name, checked) {
+    const nextLists = new Set(entry.customLists || []);
+    const existing = [...nextLists].find((item) => item.toLowerCase() === name.toLowerCase());
+    if (checked) {
+      if (existing) {
+        nextLists.delete(existing);
+      }
+      nextLists.add(name);
+    } else if (existing) {
+      nextLists.delete(existing);
+    }
+    setCustomSaving(true);
+    try {
+      const payload = await api(`/api/entries/${entry.mediaId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ customLists: [...nextLists] })
+      });
+      onUpdate(payload.entry, {
+        previousEntry: entry,
+        removeFromCurrent: Boolean(activeCustomList && !(payload.entry.customLists || []).some((item) => item.toLowerCase() === activeCustomList.toLowerCase()))
+      });
+    } catch (saveError) {
+      onNoteError(saveError.message);
+    } finally {
+      setCustomSaving(false);
     }
   }
 
@@ -2576,7 +3080,6 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
             {entry.title}
           </a>
           )}
-          <RowTitleMenu menu={titleMenu} onClose={() => setTitleMenu(null)} />
         </div>
         {!simplifiedView ? (
           <div className={hasHiddenSynonymSubtitle(entry, showSynonymSubtitle) ? "entry-detail-band subtitle-hidden" : "entry-detail-band"}>
@@ -2606,10 +3109,10 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
                   className="next-episode-badge"
                   onContextMenu={openEpisodeServerMenu}
                 >
-                  {activeStatus === "CURRENT" ? "Next Episode" : "Watch Now"}
+                  {rowStatus === "CURRENT" ? "Next Episode" : "Watch Now"}
                 </a>
               ) : null}
-              <AvailabilityBadge entry={entry} availability={availability} activeStatus={activeStatus} watchNow={watchNow} alertIconId={alertIconId} onEdit={onAvailabilityOverride} />
+              <AvailabilityBadge entry={entry} availability={availability} activeStatus={rowStatus} watchNow={watchNow} alertIconId={alertIconId} onMenu={onAvailabilityMenu} />
             </div>
           </div>
         ) : null}
@@ -2641,19 +3144,19 @@ function EntryRow({ entry, selected, onSelectedChange, onUpdate, onDelete, activ
         entry={entry}
         onUpdate={onUpdate}
         onRefreshNeeded={onRefreshNeeded}
-        shouldRefreshAtTotal={activeStatus !== "COMPLETED" && !simplifiedView}
+        shouldRefreshAtTotal={rowStatus !== "COMPLETED" && !simplifiedView}
         offlineMode={offlineMode}
       />
       <ScoreControl entry={entry} onUpdate={onUpdate} />
       {simplifiedView ? (
         <>
           <NoteControl entry={entry} onUpdate={onUpdate} onError={onNoteError} />
-          <ListStatusControl entry={entry} activeStatus={activeStatus} moving={moving} deleting={deleting} onMove={moveTo} />
+          <QuickListsControl entry={entry} customLists={customLists} activeCustomList={activeCustomList} moving={moving} deleting={deleting} customSaving={customSaving} offlineMode={offlineMode} quickListsMode={quickListsMode} onMove={moveTo} onCustomListChange={updateCustomListMembership} onQuickListsMenu={onQuickListsMenu} />
         </>
       ) : showNotes ? (
         <NoteControl entry={entry} onUpdate={onUpdate} onError={onNoteError} />
       ) : (
-        <ListStatusControl entry={entry} activeStatus={activeStatus} moving={moving} deleting={deleting} onMove={moveTo} />
+        <QuickListsControl entry={entry} customLists={customLists} activeCustomList={activeCustomList} moving={moving} deleting={deleting} customSaving={customSaving} offlineMode={offlineMode} quickListsMode={quickListsMode} onMove={moveTo} onCustomListChange={updateCustomListMembership} onQuickListsMenu={onQuickListsMenu} />
       )}
     </article>
   );
@@ -2782,74 +3285,157 @@ function AddSearchResultRow({ entry, availability, watchNow, alertIconId, showSy
   );
 }
 
-function BulkMoveBar({ entries, selectedIds, activeStatus, onMoved, onClear }) {
+function BulkMoveBar({ entries, selectedIds, activeStatus, customLists, offlineMode, onMoved, onCustomListsUpdated, onClear }) {
   const [targetStatus, setTargetStatus] = useState("PLANNING");
-  const [saving, setSaving] = useState(false);
+  const [pendingAction, setPendingAction] = useState("");
+  const [customListPage, setCustomListPage] = useState(0);
   const isRemoving = targetStatus === "__REMOVE__";
+  const isPending = Boolean(pendingAction);
+  const customListPageSize = 6;
+  const selectedEntries = entries.filter((entry) => selectedIds.has(entry.mediaId));
+  const customListPages = Math.max(1, Math.ceil(customLists.length / customListPageSize));
+  const visibleCustomLists = customLists.slice(customListPage * customListPageSize, (customListPage + 1) * customListPageSize);
+  const pendingVerb = pendingAction === "move"
+    ? "Moving"
+    : pendingAction === "addCustomList"
+      ? "Adding"
+      : pendingAction === "remove" || pendingAction === "removeCustomList"
+        ? "Removing"
+        : "";
+  const pendingMessage = pendingVerb ? `${pendingVerb} ${selectedIds.size} selected...` : "";
 
   useEffect(() => {
-    if (targetStatus === activeStatus) {
-      setTargetStatus(LIST_STATUSES.find((status) => status.value !== activeStatus)?.value || "PLANNING");
+    const currentStatus = isListStatus(activeStatus) ? activeStatus : "";
+    if (targetStatus === currentStatus) {
+      setTargetStatus(LIST_STATUSES.find((status) => status.value !== currentStatus)?.value || "PLANNING");
     }
   }, [activeStatus, targetStatus]);
+
+  useEffect(() => {
+    if (customListPage >= customListPages) {
+      setCustomListPage(customListPages - 1);
+    }
+  }, [customListPage, customListPages]);
 
   if (selectedIds.size === 0) {
     return null;
   }
 
   async function applyMove() {
-    const selectedEntries = entries.filter((entry) => selectedIds.has(entry.mediaId));
     if (isRemoving) {
       if (!window.confirm(`Remove ${selectedEntries.length} selected entries from your AniList completely?`)) {
         return;
       }
-      setSaving(true);
+      setPendingAction("remove");
       try {
         await api("/api/bulk/delete", {
           method: "POST",
           body: JSON.stringify({ entryIds: selectedEntries.map((entry) => entry.id) })
         });
-        onMoved(Array.from(selectedIds));
+        onMoved(Array.from(selectedIds), []);
       } finally {
-        setSaving(false);
+        setPendingAction("");
       }
       return;
     }
 
-    setSaving(true);
+    setPendingAction("move");
     try {
-      await api("/api/bulk/status", {
+      const payload = await api("/api/bulk/status", {
         method: "POST",
         body: JSON.stringify({ mediaIds: Array.from(selectedIds), status: targetStatus })
       });
-      onMoved(Array.from(selectedIds));
+      onMoved(Array.from(selectedIds), payload.entries || []);
     } finally {
-      setSaving(false);
+      setPendingAction("");
+    }
+  }
+
+  function entryHasCustomList(entry, name) {
+    return (entry.customLists || []).some((item) => String(item).toLowerCase() === name.toLowerCase());
+  }
+
+  function nextCustomListsForEntry(entry, name, shouldAdd) {
+    const existingLists = entry.customLists || [];
+    const existingName = existingLists.find((item) => String(item).toLowerCase() === name.toLowerCase());
+    if (shouldAdd) {
+      return existingName ? existingLists : [...existingLists, name];
+    }
+    return existingLists.filter((item) => String(item).toLowerCase() !== name.toLowerCase());
+  }
+
+  async function toggleCustomList(name) {
+    if (offlineMode || isPending || selectedEntries.length === 0) {
+      return;
+    }
+    const shouldAdd = !selectedEntries.every((entry) => entryHasCustomList(entry, name));
+    setPendingAction(shouldAdd ? "addCustomList" : "removeCustomList");
+    try {
+      const payload = await api("/api/bulk/custom-lists", {
+        method: "POST",
+        body: JSON.stringify({
+          updates: selectedEntries.map((entry) => ({
+            mediaId: entry.mediaId,
+            customLists: nextCustomListsForEntry(entry, name, shouldAdd)
+          }))
+        })
+      });
+      onCustomListsUpdated(payload.entries || []);
+    } finally {
+      setPendingAction("");
     }
   }
 
   return (
     <section className="bulk-bar" aria-label="Bulk actions">
       <strong>{selectedIds.size} selected</strong>
-      <select value={targetStatus} onChange={(event) => setTargetStatus(event.target.value)} aria-label="Bulk move target">
-        {LIST_STATUSES.filter((status) => status.value !== activeStatus).map((status) => (
+      <select value={targetStatus} disabled={isPending} onChange={(event) => setTargetStatus(event.target.value)} aria-label="Bulk move target">
+        {LIST_STATUSES.filter((status) => status.value !== (isListStatus(activeStatus) ? activeStatus : "")).map((status) => (
           <option value={status.value} key={status.value}>
             Move to {status.label}
           </option>
         ))}
         <option value="__REMOVE__">Remove from list</option>
       </select>
-      <button type="button" disabled={saving} onClick={applyMove}>
-        {saving ? (isRemoving ? "Removing..." : "Moving...") : isRemoving ? "Apply Remove" : "Apply Move"}
+      <button type="button" disabled={isPending} onClick={applyMove}>
+        Move
       </button>
-      <button type="button" className="ghost-button" onClick={onClear}>
-        Clear
+      <button type="button" className="ghost-button" disabled={isPending} onClick={onClear}>
+        Clear Checked
       </button>
+      {pendingMessage ? <span className="bulk-pending-message" role="status">{pendingMessage}</span> : null}
+      {customLists.length > 0 ? (
+        <div className="bulk-custom-list-tools" aria-label="Bulk custom list toggles">
+          <div className="bulk-custom-list-grid">
+            {visibleCustomLists.map((name) => {
+              const allSelectedHaveList = selectedEntries.length > 0 && selectedEntries.every((entry) => entryHasCustomList(entry, name));
+              return (
+                <button
+                  type="button"
+                  className={allSelectedHaveList ? "bulk-custom-list-button active" : "bulk-custom-list-button"}
+                  disabled={isPending || offlineMode}
+                  title={offlineMode ? "Custom list changes are disabled while Offline Mode is active." : allSelectedHaveList ? `Remove all selected entries from ${name}.` : `Add all selected entries to ${name}.`}
+                  onClick={() => toggleCustomList(name)}
+                  key={name}
+                >
+                  {name}
+                </button>
+              );
+            })}
+          </div>
+          {customListPages > 1 ? (
+            <div className="bulk-custom-list-pager">
+              <button type="button" className="bulk-custom-list-page-button" disabled={customListPage === 0 || isPending} title="Previous custom lists" aria-label="Previous custom lists" onClick={() => setCustomListPage((page) => Math.max(0, page - 1))}>◀</button>
+              <button type="button" className="bulk-custom-list-page-button" disabled={customListPage >= customListPages - 1 || isPending} title="Next custom lists" aria-label="Next custom lists" onClick={() => setCustomListPage((page) => Math.min(customListPages - 1, page + 1))}>▶</button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }
 
-function AdvancedFilterDialog({ open, activeStatus, filter, advancedFilters, genreOptions, ratingOptions, alertsFilterEnabled, onClose, onApply, onSaveAdvancedFilters }) {
+function AdvancedFilterDialog({ open, activeStatus, filter, advancedFilters, genreOptions, ratingOptions, customLists, alertsFilterEnabled, onClose, onApply, onSaveAdvancedFilters }) {
   const [draft, setDraft] = useState(() => normalizeAdvancedFilter(filter));
   const [saveName, setSaveName] = useState("");
   const [saveAsDefault, setSaveAsDefault] = useState(false);
@@ -2858,18 +3444,30 @@ function AdvancedFilterDialog({ open, activeStatus, filter, advancedFilters, gen
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const savedFilters = advancedFilters?.filters || [];
-  const defaultSavedId = advancedFilters?.defaultByStatus?.[activeStatus] || "";
+  const currentListType = advancedFilterListTypeForTab(activeStatus);
+  const visibleSavedFilters = savedFilters.filter((savedFilter) => savedFilterMatchesListType(savedFilter, currentListType));
+  const canSaveDefault = canUseAdvancedFilterDefaultForTab(activeStatus, customLists);
+  const rawDefaultSavedId = canSaveDefault ? advancedFilters?.defaultByStatus?.[activeStatus] || "" : "";
+  const defaultSavedId = visibleSavedFilters.some((savedFilter) => savedFilter.id === rawDefaultSavedId) ? rawDefaultSavedId : "";
+  const savedFilterTypeLabel = currentListType === "custom" ? "Saved Custom list filter:" : "Saved Status list filter:";
+  const customListOptions = normalizedCustomListFilterValues(customLists);
+  const customListFilterOptions = [NO_CUSTOM_LIST_FILTER, ...customListOptions];
+  const showStatusListFilters = activeStatus === ALL_STATUS || Boolean(customListNameFromKey(activeStatus));
+  const showCustomListFilters = activeStatus === ALL_STATUS || isListStatus(activeStatus);
+  const checkedStatusLists = draft.statusListsConfigured ? draft.statusLists : STATUS_VALUES;
+  const checkedCustomLists = draft.customListsConfigured ? draft.customLists : customListFilterOptions;
+  const selectedSavedFilter = visibleSavedFilters.find((item) => item.id === selectedSavedId) || null;
 
   useEffect(() => {
     if (open) {
       setDraft(normalizeAdvancedFilter(filter));
       setSaveName("");
       setSaveAsDefault(false);
-      setSelectedSavedId(defaultSavedId || "");
+      setSelectedSavedId("");
       setMessage("");
       setError("");
     }
-  }, [open, filter, defaultSavedId]);
+  }, [open, filter]);
 
   if (!open) {
     return null;
@@ -2904,6 +3502,20 @@ function AdvancedFilterDialog({ open, activeStatus, filter, advancedFilters, gen
     });
   }
 
+  function toggleScopedListValue(name, options, value, checked) {
+    updateDraft((current) => {
+      const configuredName = `${name}Configured`;
+      const currentValues = current[configuredName] ? current[name] : options;
+      const values = new Set(currentValues);
+      if (checked) {
+        values.add(value);
+      } else {
+        values.delete(value);
+      }
+      return { ...current, [name]: [...values], [configuredName]: true };
+    });
+  }
+
   function updateNumeric(field, patch) {
     updateDraft((current) => ({
       ...current,
@@ -2924,8 +3536,10 @@ function AdvancedFilterDialog({ open, activeStatus, filter, advancedFilters, gen
     try {
       await onSaveAdvancedFilters(nextAdvancedFilters);
       setMessage(successMessage);
+      return true;
     } catch (saveError) {
       setError(saveError.message);
+      return false;
     } finally {
       setSaving(false);
     }
@@ -2938,70 +3552,90 @@ function AdvancedFilterDialog({ open, activeStatus, filter, advancedFilters, gen
       return;
     }
 
-    const existing = savedFilters.find((savedFilter) => savedFilter.name.toLowerCase() === name.toLowerCase());
+    const existing = visibleSavedFilters.find((savedFilter) => savedFilter.name.toLowerCase() === name.toLowerCase());
     if (existing && !window.confirm(`Overwrite saved filter "${existing.name}"?`)) {
       return;
     }
 
     const id = existing?.id || `filter-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const savedFilter = { id, name, filter: normalizeAdvancedFilter(draft) };
+    const savedFilter = { id, name, listType: currentListType, filter: normalizeAdvancedFilter(draft) };
     const nextFilters = existing
       ? savedFilters.map((item) => item.id === existing.id ? savedFilter : item)
       : [...savedFilters, savedFilter];
     const defaultByStatus = { ...(advancedFilters?.defaultByStatus || {}) };
-    if (saveAsDefault) {
+    if (saveAsDefault && canSaveDefault) {
       defaultByStatus[activeStatus] = id;
     }
 
     setSelectedSavedId(id);
-    await persistAdvancedFilters({ filters: nextFilters, defaultByStatus }, saveAsDefault ? "Saved and set as default." : "Saved filter.");
+    await persistAdvancedFilters({ filters: nextFilters, defaultByStatus }, saveAsDefault && canSaveDefault ? "Saved and set as default." : "Saved filter.");
   }
 
   function loadSavedFilter() {
-    const savedFilter = savedFilters.find((item) => item.id === selectedSavedId);
-    if (!savedFilter) {
+    if (!selectedSavedFilter) {
       return;
     }
-    setDraft(normalizeAdvancedFilter(savedFilter.filter));
-    setSaveName(savedFilter.name);
-    setMessage(`Loaded "${savedFilter.name}".`);
+    setDraft(normalizeAdvancedFilter(selectedSavedFilter.filter));
+    setSaveName(selectedSavedFilter.name);
+    setMessage(`Loaded "${selectedSavedFilter.name}".`);
     setError("");
   }
 
   async function deleteSavedFilter() {
-    const savedFilter = savedFilters.find((item) => item.id === selectedSavedId);
-    if (!savedFilter || !window.confirm(`Delete saved filter "${savedFilter.name}"?`)) {
+    if (!selectedSavedFilter || !window.confirm(`Delete saved filter "${selectedSavedFilter.name}"?`)) {
       return;
     }
-    const nextFilters = savedFilters.filter((item) => item.id !== savedFilter.id);
-    const defaultByStatus = Object.fromEntries(Object.entries(advancedFilters?.defaultByStatus || {}).filter(([, id]) => id !== savedFilter.id));
+    const nextFilters = savedFilters.filter((item) => item.id !== selectedSavedFilter.id);
+    const defaultByStatus = Object.fromEntries(Object.entries(advancedFilters?.defaultByStatus || {}).filter(([, id]) => id !== selectedSavedFilter.id));
     setSelectedSavedId("");
     await persistAdvancedFilters({ filters: nextFilters, defaultByStatus }, "Deleted saved filter.");
   }
 
   async function setSelectedAsDefault() {
-    const savedFilter = savedFilters.find((item) => item.id === selectedSavedId);
-    if (!savedFilter) {
+    if (!selectedSavedFilter) {
       setError("Choose a saved filter first.");
+      return;
+    }
+    if (!canSaveDefault) {
+      setError("Defaults are only available for status and custom list tabs.");
       return;
     }
     await persistAdvancedFilters({
       filters: savedFilters,
       defaultByStatus: {
         ...(advancedFilters?.defaultByStatus || {}),
-        [activeStatus]: savedFilter.id
+        [activeStatus]: selectedSavedFilter.id
       }
-    }, `Default set to "${savedFilter.name}".`);
+    }, `Default set to "${selectedSavedFilter.name}".`);
   }
 
   async function clearDefault() {
+    if (!canSaveDefault) {
+      setError("Defaults are only available for status and custom list tabs.");
+      return;
+    }
     const defaultByStatus = { ...(advancedFilters?.defaultByStatus || {}) };
     delete defaultByStatus[activeStatus];
     await persistAdvancedFilters({ filters: savedFilters, defaultByStatus }, "Default cleared.");
   }
 
+  async function updateSelectedFilter() {
+    const nextFilter = normalizeAdvancedFilter(draft);
+    if (!selectedSavedFilter) {
+      setError("Choose a saved filter first.");
+      return;
+    }
+    const nextFilters = savedFilters.map((item) => item.id === selectedSavedFilter.id ? { ...item, listType: currentListType, filter: nextFilter } : item);
+    await persistAdvancedFilters({
+      filters: nextFilters,
+      defaultByStatus: { ...(advancedFilters?.defaultByStatus || {}) }
+    }, `Updated "${selectedSavedFilter.name}".`);
+  }
+
   function applyDraft() {
-    onApply(normalizeAdvancedFilter(draft));
+    const nextFilter = normalizeAdvancedFilter(draft);
+    setSelectedSavedId("");
+    onApply(nextFilter);
     onClose();
   }
 
@@ -3033,33 +3667,82 @@ function AdvancedFilterDialog({ open, activeStatus, filter, advancedFilters, gen
             <h3>Saved Filters</h3>
             <div className="advanced-filter-row-grid saved-filter-grid">
               <label className="field-stack">
-                <span>Saved filter</span>
+                <span>{savedFilterTypeLabel}</span>
                 <select value={selectedSavedId} title="Choose a saved advanced filter to load, set as default, or delete." onChange={(event) => setSelectedSavedId(event.target.value)}>
                   <option value="">Choose saved filter</option>
-                  {savedFilters.map((savedFilter) => (
+                  {visibleSavedFilters.map((savedFilter) => (
                     <option value={savedFilter.id} key={savedFilter.id}>
                       {savedFilter.name}{savedFilter.id === defaultSavedId ? " (default)" : ""}
                     </option>
                   ))}
                 </select>
               </label>
-              <button type="button" title="Load the selected saved filter into the draft controls." disabled={!selectedSavedId || saving} onClick={loadSavedFilter}>Load</button>
-              <button type="button" title="Use the selected saved filter automatically for this status tab." disabled={!selectedSavedId || saving} onClick={setSelectedAsDefault}>Always Load</button>
-              <button type="button" className="danger-button" title="Delete the selected saved filter." disabled={!selectedSavedId || saving} onClick={deleteSavedFilter}>Delete</button>
+              <button type="button" title="Load the selected saved filter into the draft controls." disabled={!selectedSavedFilter || saving} onClick={loadSavedFilter}>Load</button>
+              <button type="button" title="Use the selected saved filter automatically for this tab." disabled={!selectedSavedFilter || saving || !canSaveDefault} onClick={setSelectedAsDefault}>Always Load</button>
+              <button type="button" className="danger-button" title="Delete the selected saved filter." disabled={!selectedSavedFilter || saving} onClick={deleteSavedFilter}>Delete</button>
             </div>
             <div className="advanced-filter-row-grid save-filter-grid">
               <label className="field-stack">
                 <span>Name</span>
                 <input value={saveName} maxLength={80} title="Name used when saving the current draft filter." onChange={(event) => setSaveName(event.target.value)} placeholder="Saved filter name" />
               </label>
-              <label className="checkbox-row" title="Also make this saved filter the default for this status tab.">
-                <input type="checkbox" checked={saveAsDefault} onChange={(event) => setSaveAsDefault(event.target.checked)} />
+              <label className={canSaveDefault ? "checkbox-row" : "checkbox-row disabled"} title={canSaveDefault ? "Also make this saved filter the default for this tab." : "Defaults are only available for status and custom list tabs."}>
+                <input type="checkbox" checked={saveAsDefault && canSaveDefault} disabled={!canSaveDefault} onChange={(event) => setSaveAsDefault(event.target.checked)} />
                 Always load for this tab
               </label>
               <button type="button" title="Save the current draft filter under the entered name." disabled={saving} onClick={saveCurrentFilter}>{saving ? "Saving..." : "Save Current"}</button>
-              <button type="button" className="ghost-button" title="Stop automatically loading a saved filter for this status tab." disabled={!defaultSavedId || saving} onClick={clearDefault}>Clear Default</button>
+              <button type="button" className="ghost-button" title="Stop automatically loading a saved filter for this tab." disabled={!rawDefaultSavedId || saving || !canSaveDefault} onClick={clearDefault}>Clear Default</button>
             </div>
           </section>
+
+          {(showStatusListFilters || showCustomListFilters) ? (
+            <section className="advanced-filter-section">
+              <h3>Lists</h3>
+              {showStatusListFilters ? (
+                <div className="advanced-filter-option-block">
+                  <strong>Include entries in these Status Lists</strong>
+                  <div className="advanced-filter-chip-grid">
+                    {LIST_STATUSES.map((status) => (
+                      <label className="filter-chip" title={`Show entries from ${status.label}.`} key={status.value}>
+                        <input
+                          type="checkbox"
+                          checked={checkedStatusLists.includes(status.value)}
+                          onChange={(event) => toggleScopedListValue("statusLists", STATUS_VALUES, status.value, event.target.checked)}
+                        />
+                        {status.label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {showCustomListFilters ? (
+                <div className="advanced-filter-option-block">
+                  <strong>Include entries in these Custom Lists</strong>
+                  <div className="advanced-filter-chip-grid">
+                    <label className="filter-chip" title="Show entries that are not assigned to any custom list.">
+                      <input
+                        type="checkbox"
+                        checked={checkedCustomLists.some((item) => item.toLowerCase() === NO_CUSTOM_LIST_FILTER.toLowerCase())}
+                        onChange={(event) => toggleScopedListValue("customLists", customListFilterOptions, NO_CUSTOM_LIST_FILTER, event.target.checked)}
+                      />
+                      No custom list
+                    </label>
+                    {customListOptions.map((name) => (
+                      <label className="filter-chip" title={`Show entries in ${name}.`} key={name}>
+                        <input
+                          type="checkbox"
+                          checked={checkedCustomLists.some((item) => item.toLowerCase() === name.toLowerCase())}
+                          onChange={(event) => toggleScopedListValue("customLists", customListFilterOptions, name, event.target.checked)}
+                        />
+                        {name}
+                      </label>
+                    ))}
+                  </div>
+                  {customListOptions.length === 0 ? <p>No custom lists are loaded yet.</p> : null}
+                </div>
+              ) : null}
+            </section>
+          ) : null}
 
           <section className="advanced-filter-section">
             <h3>Text</h3>
@@ -3246,14 +3929,16 @@ function AdvancedFilterDialog({ open, activeStatus, filter, advancedFilters, gen
         <div className="advanced-filter-actions">
           <button type="button" className="ghost-button" title="Reset the draft controls without applying yet." onClick={() => setDraft(defaultAdvancedFilter())}>Reset</button>
           <button type="button" className="ghost-button" title="Clear all filters, apply immediately, and close this dialog." onClick={clearAndApplyFilter}>Clear Filter</button>
-          <button type="button" title="Apply the current draft filter and close this dialog." onClick={applyDraft}>Apply</button>
+          <button type="button" title="Update the selected saved filter with the current draft without applying it yet." disabled={!selectedSavedFilter || saving} onClick={updateSelectedFilter}>Update</button>
+          <button type="button" title="Apply the current draft filter and close this dialog without updating saved filters." disabled={saving} onClick={applyDraft}>OK</button>
+          <button type="button" className="secondary-button" title="Close without applying draft changes." onClick={onClose}>Cancel</button>
         </div>
       </section>
     </div>
   );
 }
 
-function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettingsChanged, offlineMode, updateInfo, onCheckUpdate }) {
+function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, listTabs, onSettingsChanged, onListTabsChanged, offlineMode, updateInfo, onCheckUpdate }) {
   const [auth, setAuth] = useState(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -3268,9 +3953,40 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
   const [serverName, setServerName] = useState("");
   const [detailsUrlTemplate, setDetailsUrlTemplate] = useState("");
   const [watchUrlTemplate, setWatchUrlTemplate] = useState("");
+  const [customListName, setCustomListName] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const watchNowServers = settings?.watchNow?.servers || [];
+  const customLists = listTabs?.customLists || [];
+  const normalizedListSettings = normalizeListSettings(settings?.lists, customLists);
+  const unorderedListRows = [
+    ...LIST_STATUSES.map((status) => listTabByKey(listTabs, status.value) || {
+      key: status.value,
+      label: status.label,
+      kind: "status",
+      status: status.value,
+      count: listTabs?.counts?.[status.value] ?? null
+    }),
+    ...customLists.map((name) => listTabByKey(listTabs, customListKey(name)) || {
+      key: customListKey(name),
+      label: name,
+      kind: "custom",
+      customList: name,
+      count: listTabs?.counts?.[customListKey(name)] ?? null
+    }),
+    listTabByKey(listTabs, ALL_STATUS) || {
+      key: ALL_STATUS,
+      label: "All",
+      kind: "all",
+      count: listTabs?.counts?.[ALL_STATUS] ?? null
+    }
+  ];
+  const rowByKey = new Map(unorderedListRows.map((row) => [row.key, row]));
+  const listRows = normalizedListSettings.tabOrder
+    .map((key) => rowByKey.get(key))
+    .filter(Boolean);
+  const visibleListTabs = new Set(normalizedListSettings.visibleTabs);
+  const defaultTabOptions = listRows.filter((row) => visibleListTabs.has(row.key));
   const sortedWatchNowServers = useMemo(
     () => [...watchNowServers].sort((a, b) => (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" })),
     [watchNowServers]
@@ -3315,6 +4031,7 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
       setMessage("");
       syncWatchNowControls();
       clearServerForm();
+      setCustomListName("");
       loadAuth();
     }
   }, [open]);
@@ -3494,7 +4211,7 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
         ...settings.appearance,
         ...nextAppearance
       }
-    });
+    }, customLists);
     onSettingsChanged(optimisticSettings);
     setSaving(true);
     setError("");
@@ -3521,7 +4238,7 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
         ...settings.updates,
         ...nextUpdates
       }
-    });
+    }, customLists);
     onSettingsChanged(optimisticSettings);
     setSaving(true);
     setError("");
@@ -3534,6 +4251,116 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
       setMessage("Update settings saved.");
     } catch (settingsError) {
       onSettingsChanged(previousSettings);
+      setError(settingsError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveListSettings(nextLists, successMessage = "List settings saved.") {
+    const previousSettings = settings;
+    const normalizedLists = normalizeListSettings(nextLists, customLists);
+    onSettingsChanged(normalizeSettings({
+      ...settings,
+      lists: normalizedLists
+    }, customLists));
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const payload = await api("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ lists: normalizedLists })
+      });
+      onSettingsChanged(payload);
+      setMessage(successMessage);
+    } catch (settingsError) {
+      onSettingsChanged(previousSettings);
+      setError(settingsError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function toggleListTab(key, checked) {
+    const nextVisible = checked
+      ? [...normalizedListSettings.visibleTabs, key]
+      : normalizedListSettings.visibleTabs.filter((item) => item !== key);
+    const normalizedVisible = nextVisible.length > 0 ? nextVisible : [normalizedListSettings.defaultTab || "CURRENT"];
+    saveListSettings({
+      ...normalizedListSettings,
+      visibleTabs: normalizedVisible,
+      defaultTab: normalizedVisible.includes(normalizedListSettings.defaultTab)
+        ? normalizedListSettings.defaultTab
+        : normalizedVisible.includes("CURRENT")
+          ? "CURRENT"
+          : normalizedVisible[0]
+    }, "Visible list tabs saved.");
+  }
+
+  function changeDefaultTab(defaultTab) {
+    saveListSettings({
+      ...normalizedListSettings,
+      defaultTab
+    }, "Default tab saved.");
+  }
+
+  function reorderListTab(dragKey, targetKey) {
+    if (!dragKey || !targetKey || dragKey === targetKey || saving) {
+      return;
+    }
+    const currentOrder = normalizedListSettings.tabOrder;
+    const fromIndex = currentOrder.indexOf(dragKey);
+    const toIndex = currentOrder.indexOf(targetKey);
+    if (fromIndex < 0 || toIndex < 0) {
+      return;
+    }
+    const nextOrder = [...currentOrder];
+    const [moved] = nextOrder.splice(fromIndex, 1);
+    nextOrder.splice(toIndex, 0, moved);
+    saveListSettings({
+      ...normalizedListSettings,
+      tabOrder: nextOrder
+    }, "List order saved.");
+  }
+
+  async function addCustomList() {
+    const name = normalizeCustomListName(customListName);
+    if (!name) {
+      setError("Enter a custom list name.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const payload = await api("/api/custom-lists", {
+        method: "POST",
+        body: JSON.stringify({ name, type: "ANIME" })
+      });
+      onListTabsChanged(payload);
+      setCustomListName("");
+      setMessage("Custom list created.");
+    } catch (settingsError) {
+      setError(settingsError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeCustomList(row) {
+    const name = row.customList || customListNameFromKey(row.key);
+    if (!name || !window.confirm(`Delete custom list "${name}" from AniList?`)) {
+      return;
+    }
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const payload = await api(`/api/custom-lists/${encodeURIComponent(name)}?type=ANIME`, { method: "DELETE" });
+      onListTabsChanged(payload);
+      setMessage("Custom list deleted.");
+    } catch (settingsError) {
       setError(settingsError.message);
     } finally {
       setSaving(false);
@@ -3578,6 +4405,9 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
           </button>
           <button type="button" className={activeTab === "watch" ? "active" : ""} onClick={() => switchSettingsTab("watch")}>
             Watch Now
+          </button>
+          <button type="button" className={activeTab === "lists" ? "active" : ""} onClick={() => switchSettingsTab("lists")}>
+            Lists
           </button>
           <button type="button" className={activeTab === "appearance" ? "active" : ""} onClick={() => switchSettingsTab("appearance")}>
             Appearance
@@ -3727,6 +4557,92 @@ function AuthSettingsDialog({ open, onClose, onAuthChanged, settings, onSettings
               <button type="button" className="add-server-button" disabled={saving} onClick={addWatchNowServer}>
                 {saving ? "Saving..." : "Add server"}
               </button>
+            </div>
+          </div>
+        ) : activeTab === "lists" ? (
+          <div className="settings-tab-panel">
+            <div className="settings-section">
+              <h3>Visible List Tabs</h3>
+              <label className="field-stack">
+                <span>Default tab</span>
+                <select
+                  value={normalizedListSettings.defaultTab}
+                  disabled={saving || defaultTabOptions.length === 0}
+                  onChange={(event) => changeDefaultTab(event.target.value)}
+                >
+                  {defaultTabOptions.map((row) => (
+                    <option value={row.key} key={row.key}>
+                      {row.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="list-tab-settings">
+                {listRows.map((row) => {
+                  const checked = visibleListTabs.has(row.key);
+                  const isLastVisible = checked && normalizedListSettings.visibleTabs.length <= 1;
+                  return (
+                    <div
+                      className="list-tab-settings-row"
+                      key={row.key}
+                      draggable={!saving}
+                      onDragStart={(event) => {
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", row.key);
+                      }}
+                      onDragOver={(event) => {
+                        if (!saving) {
+                          event.preventDefault();
+                          event.dataTransfer.dropEffect = "move";
+                        }
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        reorderListTab(event.dataTransfer.getData("text/plain"), row.key);
+                      }}
+                      title="Drag to reorder list tabs."
+                    >
+                      <span className="drag-handle" aria-hidden="true">::</span>
+                      <label className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={saving || isLastVisible}
+                          onChange={(event) => toggleListTab(row.key, event.target.checked)}
+                        />
+                        <span>{row.label}</span>
+                      </label>
+                      <span className="list-tab-count">{formatListCount(row.count ?? listTabs?.counts?.[row.key])}</span>
+                      {row.kind === "custom" ? (
+                        <button type="button" className="danger-button compact-button" disabled={saving || offlineMode} onClick={() => removeCustomList(row)}>
+                          Remove
+                        </button>
+                      ) : (
+                        <span className="list-tab-row-spacer" />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="settings-section">
+              <h3>Add Custom List</h3>
+              <div className="custom-list-create">
+                <label className="field-stack">
+                  <span>Name</span>
+                  <input
+                    value={customListName}
+                    disabled={offlineMode || saving}
+                    onChange={(event) => setCustomListName(event.target.value)}
+                    placeholder="Custom list name"
+                  />
+                </label>
+                <button type="button" className="add-server-button" disabled={offlineMode || saving || customListName.trim().length === 0} onClick={addCustomList}>
+                  {saving ? "Saving..." : "Create list"}
+                </button>
+              </div>
+              {offlineMode ? <p>Custom list changes are disabled while Offline Mode is active.</p> : null}
             </div>
           </div>
         ) : activeTab === "appearance" ? (
@@ -4077,6 +4993,7 @@ function App() {
   const [offlineDisableOpen, setOfflineDisableOpen] = useState(false);
   const [offlineSyncFailures, setOfflineSyncFailures] = useState([]);
   const [settings, setSettings] = useState(() => defaultSettings());
+  const [listTabs, setListTabs] = useState(() => defaultListTabs());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [advancedFilterOpen, setAdvancedFilterOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -4087,8 +5004,12 @@ function App() {
   const [exportNotice, setExportNotice] = useState(null);
   const [refreshChoiceOpen, setRefreshChoiceOpen] = useState(false);
   const [overrideTarget, setOverrideTarget] = useState(null);
+  const [titleMenu, setTitleMenu] = useState(null);
   const [watchServerMenu, setWatchServerMenu] = useState(null);
   const [advancedFilterMenu, setAdvancedFilterMenu] = useState(null);
+  const [availabilityMenu, setAvailabilityMenu] = useState(null);
+  const [quickListsModeMenu, setQuickListsModeMenu] = useState(null);
+  const [simplifiedQuickListsModeByTab, setSimplifiedQuickListsModeByTab] = useState({});
   const [addQuery, setAddQuery] = useState("");
   const [addSearchResults, setAddSearchResults] = useState([]);
   const [addSearchLoading, setAddSearchLoading] = useState(false);
@@ -4118,6 +5039,7 @@ function App() {
   const [systemDark, setSystemDark] = useState(() => window.matchMedia?.("(prefers-color-scheme: dark)").matches === true);
   const listRunId = useRef(0);
   const listAbortController = useRef(null);
+  const listPayloadCache = useRef(new Map());
   const addSearchRunId = useRef(0);
   const availabilityRunId = useRef(0);
   const availabilityAbortController = useRef(null);
@@ -4131,6 +5053,7 @@ function App() {
   const alertsFilterEnabled = settings.watchNow.showUnwatchedDubAlert === true || settings.watchNow.showUnwatchedSubAlert === true;
   const activeUnwatchedAlertOnly = advancedFilter.unwatchedAlertOnly && alertsFilterEnabled;
   const isAddTab = activeStatus === ADD_STATUS;
+  const activeCustomList = customListNameFromKey(activeStatus);
   const offlineEnabled = offline?.enabled === true;
   const showUpdateMarker = updateInfo?.updateAvailable === true && updateInfo?.ignored !== true;
   const simplifiedView = settings.simplifiedView === true;
@@ -4139,7 +5062,254 @@ function App() {
   const sortOrder = advancedFilter.sort.primary;
   const genreOptions = useMemo(() => availableGenreOptions(entries), [entries]);
   const ratingOptions = useMemo(() => availableRatingOptions(entries, ratings), [entries, ratings]);
-  const advancedFilterActive = advancedFilterHasActiveCriteria(advancedFilter);
+  const advancedFilterActive = advancedFilterHasActiveCriteria(advancedFilter, {
+    customLists: listTabs.customLists,
+    showStatusLists: activeStatus === ALL_STATUS || Boolean(activeCustomList),
+    showCustomLists: activeStatus === ALL_STATUS || isListStatus(activeStatus)
+  });
+  const defaultVisibleTab = normalizeListSettings(settings.lists, listTabs.customLists).defaultTab;
+  const renderedTabs = useMemo(() => visibleMainTabs(settings, listTabs), [settings.lists, listTabs]);
+  const effectiveQuickListsMode = quickListsModeForTab(settings, activeStatus, listTabs.customLists, simplifiedQuickListsModeByTab);
+
+  function cachedStatusPayload(status) {
+    return listPayloadCache.current.get(status) || null;
+  }
+
+  function cacheStatusPayload(status, payload) {
+    if (!isListStatus(status) || !payload) {
+      return;
+    }
+    listPayloadCache.current.set(status, {
+      ...payload,
+      status,
+      entries: [...(payload.entries || [])]
+    });
+  }
+
+  function updateCachedEntry(updatedEntry, previousEntry = null) {
+    if (!updatedEntry?.mediaId) {
+      return;
+    }
+    const previousStatus = previousEntry?.status;
+    const nextStatus = updatedEntry.status || previousStatus;
+    for (const status of STATUS_VALUES) {
+      const cached = cachedStatusPayload(status);
+      if (!cached) {
+        continue;
+      }
+      let nextEntries = (cached.entries || []).filter((entry) => entry.mediaId !== updatedEntry.mediaId);
+      if (status === nextStatus) {
+        const baseEntry = (cached.entries || []).find((entry) => entry.mediaId === updatedEntry.mediaId) || previousEntry || {};
+        nextEntries = [...nextEntries, { ...baseEntry, ...updatedEntry }]
+          .sort((a, b) => String(a.title || "").localeCompare(String(b.title || ""), undefined, { sensitivity: "base" }));
+      }
+      cacheStatusPayload(status, { ...cached, entries: nextEntries });
+    }
+  }
+
+  function removeCachedEntries(mediaIds) {
+    const removedIds = new Set(mediaIds);
+    for (const status of STATUS_VALUES) {
+      const cached = cachedStatusPayload(status);
+      if (!cached) {
+        continue;
+      }
+      cacheStatusPayload(status, {
+        ...cached,
+        entries: (cached.entries || []).filter((entry) => !removedIds.has(entry.mediaId))
+      });
+    }
+  }
+
+  function allCachedStatusesLoaded() {
+    return STATUS_VALUES.every((status) => cachedStatusPayload(status));
+  }
+
+  function mergedCachedEntries() {
+    const merged = [];
+    for (const status of STATUS_VALUES) {
+      const cached = cachedStatusPayload(status);
+      if (cached) {
+        merged.push(...(cached.entries || []));
+      }
+    }
+    return mergeUniqueEntries([], merged);
+  }
+
+  function entriesForTab(tabKey) {
+    if (isListStatus(tabKey)) {
+      return cachedStatusPayload(tabKey)?.entries || [];
+    }
+    const allEntries = mergedCachedEntries();
+    const customName = customListNameFromKey(tabKey);
+    if (customName) {
+      return allEntries.filter((entry) => (entry.customLists || []).some((name) => name.toLowerCase() === customName.toLowerCase()));
+    }
+    if (tabKey === ALL_STATUS) {
+      return allEntries;
+    }
+    return [];
+  }
+
+  function buildListMetadataPatchFromCache() {
+    const counts = {};
+    const customNames = new Set();
+    for (const status of STATUS_VALUES) {
+      const cached = cachedStatusPayload(status);
+      if (!cached) {
+        continue;
+      }
+      counts[status] = (cached.entries || []).length;
+      for (const entry of cached.entries || []) {
+        for (const customList of entry.customLists || []) {
+          const normalizedName = normalizeCustomListName(customList);
+          if (normalizedName) {
+            customNames.add(normalizedName);
+          }
+        }
+      }
+    }
+    if (allCachedStatusesLoaded()) {
+      const allEntries = mergedCachedEntries();
+      counts[ALL_STATUS] = allEntries.length;
+      for (const customList of listTabs.customLists || []) {
+        const normalizedName = normalizeCustomListName(customList);
+        if (normalizedName) {
+          customNames.add(normalizedName);
+        }
+      }
+      for (const customName of customNames) {
+        counts[customListKey(customName)] = allEntries.filter((entry) => (
+          (entry.customLists || []).some((name) => name.toLowerCase() === customName.toLowerCase())
+        )).length;
+      }
+    }
+    return {
+      counts,
+      customLists: [...customNames].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
+    };
+  }
+
+  async function syncListTabsFromCache() {
+    const patch = buildListMetadataPatchFromCache();
+    if (Object.keys(patch.counts).length === 0 && patch.customLists.length === 0) {
+      return null;
+    }
+    const payload = await api("/api/list-tabs?type=ANIME", {
+      method: "PATCH",
+      body: JSON.stringify(patch)
+    });
+    const normalizedTabs = normalizeListTabs(payload);
+    setListTabs((current) => sameListTabs(current, normalizedTabs) ? current : normalizedTabs);
+    setSettings((current) => {
+      const nextSettings = normalizeSettings({
+        ...current,
+        lists: {
+          visibleTabs: normalizedTabs.visibleTabs,
+          defaultTab: normalizedTabs.defaultTab,
+          tabOrder: normalizedTabs.tabOrder
+        }
+      }, normalizedTabs.customLists);
+      return sameStringArray(current.lists?.visibleTabs || [], nextSettings.lists.visibleTabs)
+        && sameStringArray(current.lists?.tabOrder || [], nextSettings.lists.tabOrder)
+        && current.lists?.defaultTab === nextSettings.lists.defaultTab
+        ? current
+        : nextSettings;
+    });
+    return normalizedTabs;
+  }
+
+  function applyListTabsPayload(payload) {
+    const normalizedTabs = normalizeListTabs(payload);
+    const allowedCustomLists = new Set(normalizedTabs.customLists.map((name) => name.toLowerCase()));
+    for (const status of STATUS_VALUES) {
+      const cached = cachedStatusPayload(status);
+      if (!cached) {
+        continue;
+      }
+      cacheStatusPayload(status, {
+        ...cached,
+        entries: (cached.entries || []).map((entry) => ({
+          ...entry,
+          customLists: (entry.customLists || []).filter((name) => allowedCustomLists.has(String(name).toLowerCase()))
+        }))
+      });
+    }
+    setListTabs((current) => sameListTabs(current, normalizedTabs) ? current : normalizedTabs);
+    setSettings((current) => {
+      const nextSettings = normalizeSettings({
+        ...current,
+        lists: {
+          visibleTabs: normalizedTabs.visibleTabs,
+          defaultTab: normalizedTabs.defaultTab,
+          tabOrder: normalizedTabs.tabOrder
+        }
+      }, normalizedTabs.customLists);
+      return sameStringArray(current.lists?.visibleTabs || [], nextSettings.lists.visibleTabs)
+        && sameStringArray(current.lists?.tabOrder || [], nextSettings.lists.tabOrder)
+        && current.lists?.defaultTab === nextSettings.lists.defaultTab
+        ? current
+        : nextSettings;
+    });
+    return normalizedTabs;
+  }
+
+  async function refreshRemoteListTabs(healthPayload = null) {
+    try {
+      const currentHealth = healthPayload || await api("/api/health");
+      setHealth(currentHealth);
+      setOffline(currentHealth.offline || { enabled: false, queued: 0 });
+      if (!currentHealth.tokenPresent || currentHealth.offline?.enabled === true) {
+        return null;
+      }
+      const payload = await api("/api/list-tabs?type=ANIME&refresh=true");
+      return applyListTabsPayload(payload);
+    } catch (metadataError) {
+      console.warn("AniList custom list sync failed.", metadataError);
+      return null;
+    }
+  }
+
+  async function fetchStatusPayload(status, healthPayload, runId, abortController) {
+    const cached = cachedStatusPayload(status);
+    const offlineModeActive = healthPayload.offline?.enabled === true;
+    if (cached && (cached.offline === true) === offlineModeActive) {
+      return cached;
+    }
+
+    let listPayload;
+    if (healthPayload.offline?.enabled === true) {
+      setLoadProgress(`Loading local ${statusLabel(status)} list...`);
+      listPayload = await api(`/api/lists?status=${encodeURIComponent(status)}&type=ANIME`, { signal: abortController.signal });
+    } else {
+      setLoadProgress(`Loading ${statusLabel(status)} AniList items... 0 found.`);
+      let chunk = 1;
+      let mergedEntries = [];
+      const chunkPayloads = [];
+      let hasNextChunk = true;
+      while (hasNextChunk) {
+        const chunkPayload = await api(`/api/lists?status=${encodeURIComponent(status)}&type=ANIME&chunk=${chunk}&perChunk=${LIST_CHUNK_SIZE}`, { signal: abortController.signal });
+        if (listRunId.current !== runId) {
+          return null;
+        }
+        chunkPayloads.push(chunkPayload);
+        mergedEntries = mergeUniqueEntries(mergedEntries, chunkPayload.entries || []);
+        setLoadProgress(`Loading ${statusLabel(status)} AniList items... ${mergedEntries.length} found.`);
+        hasNextChunk = chunkPayload.diagnostics?.hasNextChunk === true;
+        listPayload = {
+          ...chunkPayload,
+          status,
+          entries: mergedEntries,
+          diagnostics: combineChunkDiagnostics(chunkPayloads, mergedEntries.length)
+        };
+        chunk += 1;
+      }
+    }
+    if (listPayload) {
+      cacheStatusPayload(status, listPayload);
+    }
+    return listPayload;
+  }
 
   async function load(status = activeStatus) {
     if (status === ADD_STATUS) {
@@ -4176,53 +5346,44 @@ function App() {
         return;
       }
 
-      let listPayload;
-      if (healthPayload.offline?.enabled === true) {
-        setLoadProgress("Loading local list...");
-        listPayload = await api(`/api/lists?status=${encodeURIComponent(status)}&type=ANIME`, { signal: abortController.signal });
-      } else {
-        setLoadProgress("Loading AniList items... 0 found.");
-        let chunk = 1;
-        let mergedEntries = [];
-        const chunkPayloads = [];
-        let hasNextChunk = true;
-        while (hasNextChunk) {
-          const chunkPayload = await api(`/api/lists?status=${encodeURIComponent(status)}&type=ANIME&chunk=${chunk}&perChunk=${LIST_CHUNK_SIZE}`, { signal: abortController.signal });
-          if (listRunId.current !== runId) {
-            return;
-          }
-          chunkPayloads.push(chunkPayload);
-          mergedEntries = mergeUniqueEntries(mergedEntries, chunkPayload.entries || []);
-          setLoadProgress(`Loading AniList items... ${mergedEntries.length} found.`);
-          hasNextChunk = chunkPayload.diagnostics?.hasNextChunk === true;
-          listPayload = {
-            ...chunkPayload,
-            entries: mergedEntries,
-            diagnostics: combineChunkDiagnostics(chunkPayloads, mergedEntries.length)
-          };
-          chunk += 1;
+      const neededStatuses = isListStatus(status) ? [status] : STATUS_VALUES;
+      const loadedPayloads = [];
+      for (const listStatus of neededStatuses) {
+        const payload = await fetchStatusPayload(listStatus, healthPayload, runId, abortController);
+        if (listRunId.current !== runId || !payload) {
+          return;
         }
+        loadedPayloads.push(payload);
       }
       if (listRunId.current !== runId) {
         return;
       }
-      setUser(listPayload.user);
-      setEntries(listPayload.entries);
-      setOffline(listPayload.offline ? { ...(healthPayload.offline || {}), enabled: true, queued: listPayload.queued ?? healthPayload.offline?.queued ?? 0 } : healthPayload.offline || { enabled: false, queued: 0 });
-      setAvailability(listPayload.availability || {});
-      setRatings(listPayload.ratings || {});
+
+      await syncListTabsFromCache();
+      const tabEntries = entriesForTab(status);
+      const payloadsForState = neededStatuses.map((listStatus) => cachedStatusPayload(listStatus)).filter(Boolean);
+      const firstPayload = payloadsForState[0] || loadedPayloads[0] || {};
+      const mergedAvailability = Object.assign({}, ...payloadsForState.map((payload) => payload.availability || {}));
+      const mergedRatings = Object.assign({}, ...payloadsForState.map((payload) => payload.ratings || {}));
+      setUser(firstPayload.user || null);
+      setEntries(tabEntries);
+      setOffline(firstPayload.offline ? { ...(healthPayload.offline || {}), enabled: true, queued: firstPayload.queued ?? healthPayload.offline?.queued ?? 0 } : healthPayload.offline || { enabled: false, queued: 0 });
+      setAvailability(mergedAvailability);
+      setRatings(mergedRatings);
       setAvailabilityProgress({ checked: 0, total: 0 });
       setAvailabilityWarning("");
-      setLoadDiagnostics(formatLoadDiagnostics(listPayload.diagnostics));
+      setLoadDiagnostics(isListStatus(status)
+        ? formatLoadDiagnostics(firstPayload.diagnostics)
+        : formatLoadDiagnostics({ source: "local-cache", entryCount: tabEntries.length }));
       setLoadProgress("");
       setSelectedIds(new Set());
-      if (!listPayload.offline && !simplifiedView) {
+      if (!firstPayload.offline && !simplifiedView) {
         const cacheOnly = hasRecentAutoAvailability(status);
         if (!cacheOnly) {
           markAutoAvailability(status);
         }
-        loadAvailability(listPayload.entries, false, { cacheOnly, preloadReusableCache: true, background: cacheOnly });
-        loadRatings(listPayload.entries);
+        loadAvailability(tabEntries, false, { cacheOnly, preloadReusableCache: true, background: cacheOnly });
+        loadRatings(tabEntries);
       }
     } catch (loadError) {
       if (loadError.name === "AbortError" || listRunId.current !== runId) {
@@ -4284,8 +5445,11 @@ function App() {
     setSelectedIds(new Set());
     setRefreshChoiceOpen(false);
     setOverrideTarget(null);
+    setTitleMenu(null);
     setWatchServerMenu(null);
     setAdvancedFilterMenu(null);
+    setAvailabilityMenu(null);
+    setQuickListsModeMenu(null);
     setAdvancedFilterOpen(false);
     setUpdatingCompletedProgress(false);
     setCompletedProgressUpdate({ checked: 0, total: 0 });
@@ -4296,20 +5460,35 @@ function App() {
   }
 
   async function loadSettings() {
+    let shouldRefreshRemoteTabs = false;
     try {
-      const settingsPayload = await api("/api/settings");
-      const nextSettings = normalizeSettings(settingsPayload);
+      const [settingsPayload, listTabsPayload] = await Promise.all([
+        api("/api/settings"),
+        api("/api/list-tabs?type=ANIME")
+      ]);
+      const nextListTabs = normalizeListTabs(listTabsPayload);
+      setListTabs(nextListTabs);
+      const nextSettings = normalizeSettings(settingsPayload, nextListTabs.customLists);
       setSettings(nextSettings);
+      setSimplifiedQuickListsModeByTab(nextSettings.simplifiedView ? defaultSimplifiedQuickListsModeByTab(nextListTabs.customLists) : {});
+      setActiveStatus(nextSettings.lists.defaultTab);
       if (settingsPayload.offline) {
         setOffline(settingsPayload.offline);
       }
+      shouldRefreshRemoteTabs = settingsPayload.offline?.enabled !== true;
       setShowNotes(nextSettings.showNotes);
     } catch {
       const fallbackSettings = defaultSettings();
       setSettings(fallbackSettings);
+      setListTabs(defaultListTabs());
+      setSimplifiedQuickListsModeByTab(fallbackSettings.simplifiedView ? defaultSimplifiedQuickListsModeByTab() : {});
+      setActiveStatus(fallbackSettings.lists.defaultTab);
       setShowNotes(fallbackSettings.showNotes);
     } finally {
       setSettingsLoaded(true);
+    }
+    if (shouldRefreshRemoteTabs) {
+      refreshRemoteListTabs();
     }
   }
 
@@ -4341,10 +5520,78 @@ function App() {
     setAdvancedFilter(defaultAdvancedFilter());
   }
 
+  function closeContextMenus() {
+    setTitleMenu(null);
+    setWatchServerMenu(null);
+    setAdvancedFilterMenu(null);
+    setAvailabilityMenu(null);
+    setQuickListsModeMenu(null);
+  }
+
+  function openTitleMenu(menu) {
+    closeContextMenus();
+    setTitleMenu(menu);
+  }
+
+  function openWatchServerMenu(menu) {
+    closeContextMenus();
+    setWatchServerMenu(menu);
+  }
+
   function openAdvancedFilterMenu(event) {
     event.preventDefault();
     event.stopPropagation();
+    closeContextMenus();
     setAdvancedFilterMenu(linkMenuPosition(event, 170, 48));
+  }
+
+  function openAvailabilityMenu(menu) {
+    closeContextMenus();
+    setAvailabilityMenu(menu);
+  }
+
+  function openAvailabilityOverride(entry, currentAvailability) {
+    setOverrideTarget({ entry, availability: currentAvailability });
+  }
+
+  function openQuickListsModeMenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeContextMenus();
+    setQuickListsModeMenu({
+      ...linkMenuPosition(event, 210, 48),
+      mode: effectiveQuickListsMode
+    });
+  }
+
+  async function saveQuickListsMode(nextMode) {
+    const normalizedMode = normalizeQuickListsMode(nextMode);
+    if (simplifiedView) {
+      setSimplifiedQuickListsModeByTab((current) => ({
+        ...current,
+        [activeStatus]: normalizedMode
+      }));
+      setQuickListsModeMenu((current) => current ? { ...current, mode: normalizedMode } : current);
+      return;
+    }
+
+    const previousSettings = settings;
+    const nextQuickListsModeByTab = normalizeQuickListsModeByTab({
+      ...settings.quickListsModeByTab,
+      [activeStatus]: normalizedMode
+    }, listTabs.customLists);
+    setSettings(normalizeSettings({ ...settings, quickListsModeByTab: nextQuickListsModeByTab }, listTabs.customLists));
+    setQuickListsModeMenu((current) => current ? { ...current, mode: normalizedMode } : current);
+    try {
+      const nextSettings = normalizeSettings(await api("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ quickListsModeByTab: nextQuickListsModeByTab })
+      }), listTabs.customLists);
+      setSettings(nextSettings);
+    } catch (settingsError) {
+      setSettings(previousSettings);
+      setError(settingsError.message);
+    }
   }
 
   function setAdvancedFilterBoolean(name, checked) {
@@ -4373,14 +5620,14 @@ function App() {
   }
 
   async function saveAdvancedFilters(nextAdvancedFilters) {
-    const normalizedAdvancedFilters = normalizeAdvancedFilters(nextAdvancedFilters);
+    const normalizedAdvancedFilters = normalizeAdvancedFilters(nextAdvancedFilters, listTabs.customLists);
     const previousSettings = settings;
-    setSettings(normalizeSettings({ ...settings, advancedFilters: normalizedAdvancedFilters }));
+    setSettings(normalizeSettings({ ...settings, advancedFilters: normalizedAdvancedFilters }, listTabs.customLists));
     try {
       const payload = normalizeSettings(await api("/api/settings", {
         method: "PATCH",
         body: JSON.stringify({ advancedFilters: normalizedAdvancedFilters })
-      }));
+      }), listTabs.customLists);
       setSettings(payload);
       return payload.advancedFilters;
     } catch (settingsError) {
@@ -4416,6 +5663,16 @@ function App() {
     document.documentElement.dataset.accentTheme = appearance.accentTheme;
   }, [settings.appearance, systemDark]);
 
+  useEffect(() => {
+    if (!simplifiedView) {
+      return;
+    }
+    setSimplifiedQuickListsModeByTab((current) => ({
+      ...defaultSimplifiedQuickListsModeByTab(listTabs.customLists),
+      ...normalizeQuickListsModeByTab(current, listTabs.customLists)
+    }));
+  }, [listTabs.customLists, simplifiedView]);
+
   async function toggleNotesMode() {
     const nextShowNotes = !showNotes;
     setShowNotes(nextShowNotes);
@@ -4423,7 +5680,7 @@ function App() {
       const nextSettings = normalizeSettings(await api("/api/settings", {
         method: "PATCH",
         body: JSON.stringify({ showNotes: nextShowNotes })
-      }));
+      }), listTabs.customLists);
       setSettings(nextSettings);
       setShowNotes(nextSettings.showNotes);
     } catch (settingsError) {
@@ -4434,7 +5691,10 @@ function App() {
 
   async function toggleSimplifiedView(checked) {
     const previousSettings = settings;
-    setSettings(normalizeSettings({ ...settings, simplifiedView: checked }));
+    const previousSimplifiedModes = simplifiedQuickListsModeByTab;
+    const settingsPatch = { simplifiedView: checked };
+    setSettings(normalizeSettings({ ...settings, ...settingsPatch }, listTabs.customLists));
+    setSimplifiedQuickListsModeByTab(checked ? defaultSimplifiedQuickListsModeByTab(listTabs.customLists) : {});
     if (checked) {
       cancelAvailabilityRefresh();
       setRefreshChoiceOpen(false);
@@ -4442,11 +5702,12 @@ function App() {
     try {
       const nextSettings = normalizeSettings(await api("/api/settings", {
         method: "PATCH",
-        body: JSON.stringify({ simplifiedView: checked })
-      }));
+        body: JSON.stringify(settingsPatch)
+      }), listTabs.customLists);
       setSettings(nextSettings);
     } catch (settingsError) {
       setSettings(previousSettings);
+      setSimplifiedQuickListsModeByTab(previousSimplifiedModes);
       setError(settingsError.message);
     }
   }
@@ -4774,6 +6035,7 @@ function App() {
       }
       const status = job.result || await api("/api/offline");
       setOffline(status);
+      listPayloadCache.current.clear();
       const warnings = [];
       if (Number(status.missingAvailability) > 0) {
         warnings.push(`availability missing for ${status.missingAvailability} entries`);
@@ -4791,7 +6053,7 @@ function App() {
           : `Offline Mode enabled with ${status.entryCount || 0} packaged entries.`
       });
       if (activeStatus === ADD_STATUS) {
-        switchStatus("CURRENT");
+        switchStatus(defaultVisibleTab);
       } else {
         await load(activeStatus);
       }
@@ -4824,7 +6086,7 @@ function App() {
       if (Number(syncPayload.failed || 0) > 0) {
         setOfflineSyncFailures(Array.isArray(syncPayload.failures) ? syncPayload.failures : []);
         setOffline(await api("/api/offline"));
-        await load(activeStatus === ADD_STATUS ? "CURRENT" : activeStatus);
+        await load(activeStatus === ADD_STATUS ? defaultVisibleTab : activeStatus);
         return;
       }
       await finishOfflineDisable({ discardQueued: false, syncPayload });
@@ -4845,7 +6107,7 @@ function App() {
   async function stayOfflineAfterSyncFailure() {
     setOfflineSyncFailures([]);
     await refreshOfflineStatus();
-    await load(activeStatus === ADD_STATUS ? "CURRENT" : activeStatus);
+    await load(activeStatus === ADD_STATUS ? defaultVisibleTab : activeStatus);
   }
 
   async function finishOfflineDisable({ discardQueued, syncPayload = null }) {
@@ -4860,6 +6122,7 @@ function App() {
         body: JSON.stringify({ discardQueued, removeData })
       });
       setOffline(payload);
+      listPayloadCache.current.clear();
       setOfflineNotice({
         type: "success",
         text: syncPayload
@@ -4868,7 +6131,8 @@ function App() {
             ? "Offline Mode disabled. Queued edits were discarded."
           : "Offline Mode disabled."
       });
-      await load(activeStatus === ADD_STATUS ? "CURRENT" : activeStatus);
+      await refreshRemoteListTabs();
+      await load(activeStatus === ADD_STATUS ? defaultVisibleTab : activeStatus);
     } catch (offlineError) {
       setError(offlineError.message);
     } finally {
@@ -4923,6 +6187,11 @@ function App() {
 
   useEffect(() => {
     if (settingsLoaded && activeStatus !== ADD_STATUS) {
+      const listSettings = normalizeListSettings(settings.lists, listTabs.customLists);
+      if (!listSettings.visibleTabs.includes(activeStatus)) {
+        switchStatus(listSettings.defaultTab);
+        return;
+      }
       load(activeStatus);
     }
   }, [activeStatus, settingsLoaded]);
@@ -4960,13 +6229,15 @@ function App() {
       return;
     }
     const defaultSavedId = settings.advancedFilters?.defaultByStatus?.[activeStatus] || "";
-    const applyKey = `${activeStatus}:${defaultSavedId}`;
+    const currentListType = advancedFilterListTypeForTab(activeStatus);
+    const savedFilter = settings.advancedFilters?.filters?.find((item) => item.id === defaultSavedId);
+    const usableSavedFilter = savedFilterMatchesListType(savedFilter, currentListType) ? savedFilter : null;
+    const applyKey = `${activeStatus}:${defaultSavedId}:${usableSavedFilter?.listType || "legacy"}`;
     if (defaultFilterApplyRef.current === applyKey) {
       return;
     }
     defaultFilterApplyRef.current = applyKey;
-    const savedFilter = settings.advancedFilters?.filters?.find((item) => item.id === defaultSavedId);
-    setAdvancedFilter(savedFilter ? normalizeAdvancedFilter(savedFilter.filter) : defaultAdvancedFilter());
+    setAdvancedFilter(usableSavedFilter ? normalizeAdvancedFilter(usableSavedFilter.filter) : defaultAdvancedFilter());
   }, [activeStatus, isAddTab, settings.advancedFilters]);
 
   const filteredEntries = useMemo(() => {
@@ -5028,6 +6299,9 @@ function App() {
   }, [focusedPreviewEntry]);
 
   function updateEntry(updatedEntry, options = {}) {
+    const previousEntry = options.previousEntry || entries.find((entry) => entry.mediaId === updatedEntry.mediaId) || null;
+    updateCachedEntry(updatedEntry, previousEntry);
+    syncListTabsFromCache().catch((metadataError) => console.warn("List metadata sync failed.", metadataError));
     if (options.removeFromCurrent) {
       setEntries((currentEntries) => currentEntries.filter((entry) => entry.mediaId !== updatedEntry.mediaId));
       setSelectedIds((current) => {
@@ -5040,8 +6314,8 @@ function App() {
       }
       return;
     }
-    setEntries((currentEntries) =>
-      currentEntries.map((entry) => {
+    setEntries((currentEntries) => {
+      const nextEntries = currentEntries.map((entry) => {
         if (entry.mediaId !== updatedEntry.mediaId) {
           return entry;
         }
@@ -5049,12 +6323,12 @@ function App() {
         if (!updatedEntry.nextAiringEpisode && entry.nextAiringEpisode) {
           nextEntry.nextAiringEpisode = entry.nextAiringEpisode;
         }
-        if (entry.isAiring && nextEntry.nextAiringEpisode) {
-          nextEntry.isAiring = true;
-        }
         return nextEntry;
-      })
-    );
+      });
+      return nextEntries.some((entry) => entry.mediaId === updatedEntry.mediaId)
+        ? nextEntries
+        : entriesForTab(activeStatus);
+    });
     if (Number.isFinite(options.preserveScrollY)) {
       const restoreRunId = scrollRestoreRunId.current + 1;
       scrollRestoreRunId.current = restoreRunId;
@@ -5196,6 +6470,8 @@ function App() {
   }
 
   function updateAddSearchResult(mediaId, updatedEntry) {
+    updateCachedEntry(updatedEntry, null);
+    syncListTabsFromCache().catch((metadataError) => console.warn("List metadata sync failed.", metadataError));
     setAddSearchResults((currentResults) =>
       currentResults.map((entry) =>
         entry.mediaId === mediaId
@@ -5212,16 +6488,45 @@ function App() {
     setAddSearchNotice(`Added "${updatedEntry.title}" to ${statusLabel(updatedEntry.status)}.`);
   }
 
-  function removeMoved(mediaIds) {
+  function removeMoved(mediaIds, updatedEntries = []) {
     const movedIds = new Set(mediaIds);
-    setEntries((currentEntries) => currentEntries.filter((entry) => !movedIds.has(entry.mediaId)));
+    for (const updatedEntry of updatedEntries) {
+      const previousEntry = entries.find((entry) => entry.mediaId === updatedEntry.mediaId) || null;
+      updateCachedEntry(updatedEntry, previousEntry);
+    }
+    if (updatedEntries.length === 0) {
+      removeCachedEntries(mediaIds);
+    }
+    setEntries((currentEntries) => {
+      if (updatedEntries.length > 0 && !isListStatus(activeStatus)) {
+        return entriesForTab(activeStatus);
+      }
+      return currentEntries.filter((entry) => !movedIds.has(entry.mediaId));
+    });
     setSelectedIds(new Set());
+    syncListTabsFromCache().catch((metadataError) => console.warn("List metadata sync failed.", metadataError));
     if (offlineEnabled) {
       refreshOfflineStatus();
     }
   }
 
+  function updateBulkCustomLists(updatedEntries = []) {
+    for (const updatedEntry of updatedEntries) {
+      const previousEntry = entries.find((entry) => entry.mediaId === updatedEntry.mediaId) || null;
+      updateCachedEntry(updatedEntry, previousEntry);
+    }
+    setEntries((currentEntries) => {
+      if (!isListStatus(activeStatus)) {
+        return entriesForTab(activeStatus);
+      }
+      return currentEntries.map((entry) => updatedEntries.find((updatedEntry) => updatedEntry.mediaId === entry.mediaId) || entry);
+    });
+    setSelectedIds(new Set());
+    syncListTabsFromCache().catch((metadataError) => console.warn("List metadata sync failed.", metadataError));
+  }
+
   function removeDeleted(mediaId) {
+    removeCachedEntries([mediaId]);
     setEntries((currentEntries) => currentEntries.filter((entry) => entry.mediaId !== mediaId));
     setAvailability((currentAvailability) => {
       const next = { ...currentAvailability };
@@ -5233,6 +6538,7 @@ function App() {
       next.delete(mediaId);
       return next;
     });
+    syncListTabsFromCache().catch((metadataError) => console.warn("List metadata sync failed.", metadataError));
     if (offlineEnabled) {
       refreshOfflineStatus();
     }
@@ -5351,15 +6657,17 @@ function App() {
   }
 
   function prepareFilteredExport() {
+    const activeListStatus = isListStatus(activeStatus) ? activeStatus : "";
     return {
       scope: "filtered",
-      statuses: [activeStatus],
+      statuses: activeListStatus ? [activeListStatus] : [...new Set(filteredEntries.map((entry) => entry.status).filter(Boolean))],
       user,
       entries: buildExportEntries(filteredEntries.map((entry) => ({
         ...entry,
-        listStatus: activeStatus
+        listStatus: activeListStatus || entry.status
       })), {
-        listStatus: activeStatus,
+        listStatus: activeListStatus,
+        listName: tabLabel(activeStatus, listTabs),
         availability,
         ratings
       }),
@@ -5497,8 +6805,8 @@ function App() {
       ? "Disabled while Offline Mode is active."
       : "Check current episode availability for the visible list.";
   const notesModeTitle = showNotes
-    ? "Return to the standard list view."
-    : "Show list entry notes.";
+    ? "Show Quick Lists controls."
+    : "Show AniList notes.";
   const exportTitle = exporting
     ? "Export in progress."
     : "Export list data.";
@@ -5506,6 +6814,12 @@ function App() {
     ? "Turn off Offline Mode and choose how to handle queued changes."
     : "Use the app without syncing changes until Offline Mode is turned off.";
   const hasIncompleteCompletedProgress = completedProgressUpdateItems(actionTargetEntries()).length > 0;
+
+  async function reloadAfterAuthChanged() {
+    listPayloadCache.current.clear();
+    await refreshRemoteListTabs();
+    await load(activeStatus === ADD_STATUS ? defaultVisibleTab : activeStatus);
+  }
 
   return (
     <main>
@@ -5610,20 +6924,23 @@ function App() {
 
         <div className="status-strip">
           <nav className="tabs" aria-label="Anime list status">
-            {STATUSES.map((status) => (
-              <button
-                type="button"
-                key={status.value}
-                disabled={offlineEnabled && status.value === ADD_STATUS}
-                className={[
-                  status.value === activeStatus ? "active" : "",
-                  status.value === ADD_STATUS ? "add-tab" : ""
+            <div className="tabs-main">
+              {renderedTabs.map((status) => (
+                <button
+                  type="button"
+                  key={status.key}
+                  disabled={offlineEnabled && status.key === ADD_STATUS}
+                  className={[
+                    status.key === activeStatus ? "active" : "",
+                    status.key === ADD_STATUS ? "add-tab" : "",
+                    status.kind === "custom" ? "custom-tab" : ""
                 ].filter(Boolean).join(" ")}
-                onClick={() => switchStatus(status.value)}
+                onClick={() => switchStatus(status.key)}
               >
                 {status.label}
-              </button>
-            ))}
+                </button>
+              ))}
+            </div>
           </nav>
           <div className="list-actions command-group">
             {activeStatus === "COMPLETED" && !isAddTab && (hasIncompleteCompletedProgress || updatingCompletedProgress) ? (
@@ -5641,11 +6958,6 @@ function App() {
             ) : null}
             {updatingCompletedProgress && !isAddTab ? (
               <button type="button" className="stop-refresh" onClick={cancelCompletedProgressUpdate} aria-label="Stop progress update" title="Stop progress update" />
-            ) : null}
-            {!simplifiedView ? (
-              <button type="button" className="ghost-button" disabled={isAddTab || loading} title={notesModeTitle} onClick={toggleNotesMode}>
-                {showNotes ? "View Lists" : "View Notes"}
-              </button>
             ) : null}
             <button type="button" className="ghost-button" disabled={isAddTab || loading || exporting} title={exportTitle} onClick={() => setExportOpen(true)}>
               {exporting ? "Exporting..." : "Export"}
@@ -5801,9 +7113,16 @@ function App() {
                 </label>
               </div>
             ) : null}
-            <span className="count">
-              {isAddTab ? `${sortedAddSearchResults.length} results` : `${filteredEntries.length} entries`}
-            </span>
+            <div className="count-actions">
+              {!isAddTab && !simplifiedView ? (
+                <button type="button" className="ghost-button compact-swap-button" disabled={loading} title={notesModeTitle} onClick={toggleNotesMode}>
+                  {showNotes ? "Swap Quick Lists" : "Swap Notes"}
+                </button>
+              ) : null}
+              <span className="count">
+                {isAddTab ? `${sortedAddSearchResults.length} results` : `${filteredEntries.length} entries`}
+              </span>
+            </div>
           </div>
         </section>
       </section>
@@ -5811,10 +7130,12 @@ function App() {
       <AuthSettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        onAuthChanged={() => load(activeStatus)}
+        onAuthChanged={reloadAfterAuthChanged}
         settings={settings}
+        listTabs={listTabs}
         offlineMode={offlineEnabled}
-        onSettingsChanged={(nextSettings) => setSettings(normalizeSettings(nextSettings))}
+        onSettingsChanged={(nextSettings) => setSettings(normalizeSettings(nextSettings, listTabs.customLists))}
+        onListTabsChanged={applyListTabsPayload}
         updateInfo={updateInfo}
         onCheckUpdate={checkUpdateInfo}
       />
@@ -5850,6 +7171,7 @@ function App() {
         advancedFilters={settings.advancedFilters}
         genreOptions={genreOptions}
         ratingOptions={ratingOptions}
+        customLists={listTabs.customLists}
         alertsFilterEnabled={alertsFilterEnabled}
         onClose={() => setAdvancedFilterOpen(false)}
         onApply={setAdvancedFilter}
@@ -5880,8 +7202,11 @@ function App() {
         onSave={saveAvailabilityOverride}
         onRemove={removeAvailabilityOverride}
       />
+      <RowTitleMenu menu={titleMenu} onClose={() => setTitleMenu(null)} />
       <WatchServerMenu menu={watchServerMenu} onClose={() => setWatchServerMenu(null)} />
       <AdvancedFilterMenu menu={advancedFilterMenu} onClose={() => setAdvancedFilterMenu(null)} onClear={clearAdvancedFilter} />
+      <AvailabilityActionMenu menu={availabilityMenu} onClose={() => setAvailabilityMenu(null)} onOverride={openAvailabilityOverride} />
+      <QuickListsModeMenu menu={quickListsModeMenu} onClose={() => setQuickListsModeMenu(null)} onModeChange={saveQuickListsMode} />
       <FocusedEntryPreview entry={focusedPreviewEntry} origin={focusedPreviewOrigin} onClose={closeFocusedPreview} />
 
       {error ? <div className="error-banner">{error}</div> : null}
@@ -5897,7 +7222,10 @@ function App() {
           entries={entries}
           selectedIds={selectedIds}
           activeStatus={activeStatus}
+          customLists={listTabs.customLists}
+          offlineMode={offlineEnabled}
           onMoved={removeMoved}
+          onCustomListsUpdated={updateBulkCustomLists}
           onClear={() => setSelectedIds(new Set())}
         />
       ) : null}
@@ -5921,7 +7249,7 @@ function App() {
                     onAdded={updateAddSearchResult}
                     onPreviewFocus={openFocusedPreview}
                     previewFocused={Boolean(focusedPreviewEntry)}
-                    onOpenWatchServerMenu={setWatchServerMenu}
+                    onOpenWatchServerMenu={openWatchServerMenu}
                   />
                 ))
               : null}
@@ -5940,6 +7268,8 @@ function App() {
                 onUpdate={updateEntry}
                 onDelete={removeDeleted}
                 activeStatus={activeStatus}
+                customLists={listTabs.customLists}
+                activeCustomList={activeCustomList}
                 availability={availability[entry.mediaId]}
                 rating={ratings[entry.mediaId]}
                 watchNow={settings.watchNow}
@@ -5948,13 +7278,16 @@ function App() {
                 showSynonymInfoIcon={settings.appearance.showSynonymInfoIcon}
                 showNotes={showNotes}
                 simplifiedView={simplifiedView}
+                quickListsMode={effectiveQuickListsMode}
                 onNoteError={setError}
                 offlineMode={offlineEnabled}
                 onPreviewFocus={openFocusedPreview}
                 previewFocused={Boolean(focusedPreviewEntry)}
-                onOpenWatchServerMenu={setWatchServerMenu}
+                onOpenTitleMenu={openTitleMenu}
+                onOpenWatchServerMenu={openWatchServerMenu}
+                onQuickListsMenu={openQuickListsModeMenu}
                 onRefreshNeeded={() => load(activeStatus)}
-                onAvailabilityOverride={(entryToEdit, currentAvailability) => setOverrideTarget({ entry: entryToEdit, availability: currentAvailability })}
+                onAvailabilityMenu={openAvailabilityMenu}
               />
             ))
           : null}
@@ -5966,4 +7299,7 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+const rootElement = document.getElementById("root");
+const root = window.__anilistManagerRoot || createRoot(rootElement);
+window.__anilistManagerRoot = root;
+root.render(<App />);
