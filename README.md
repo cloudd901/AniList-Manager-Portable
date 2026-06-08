@@ -10,7 +10,9 @@ The release is portable. Unzip it, run `AniListManagerPortable.exe`, and keep th
 
 ### List Management
 
-![AniList Manager list view with list controls](docs/screenshots/00-main-list-view-lists-mode.png)
+![AniList Manager Watching list with custom lists hidden](docs/screenshots/00-main-list-view-lists-mode-hidden.png)
+
+![AniList Manager Watching list with full custom list controls](docs/screenshots/00-main-list-view-lists-mode-full.png)
 
 ### Notes And Availability
 
@@ -20,7 +22,7 @@ The release is portable. Unzip it, run `AniListManagerPortable.exe`, and keep th
 
 ![AniList Manager list view with hidden right-click action callouts](docs/screenshots/06-hidden-rightclick-options.png)
 
-![AniList Manager right-click menus for filters, title copy actions, and Watch Now server choices](docs/screenshots/07-hidden-rightclick-options-visible.png)
+![AniList Manager right-click menus for filters, title copy actions, and Watch Now server choices](docs/screenshots/07-visible-rightclick-options.png)
 
 ![AniList Manager availability override dialog opened from a right-click availability badge](docs/screenshots/08-hidden-rightclick-options-override.png)
 
