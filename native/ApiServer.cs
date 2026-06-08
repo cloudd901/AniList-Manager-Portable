@@ -6,7 +6,7 @@ using System.Text.Json.Nodes;
 
 namespace AniListManagerPortable;
 
-internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniListClient aniList, AvailabilityService availability, OfflineService offline, UpdateService updates, AppPaths paths)
+internal sealed class ApiServer(TokenStore tokens, ListMetadataStore listMetadata, WatchNowStore watchNow, AniListClient aniList, AvailabilityService availability, OfflineService offline, UpdateService updates, AppPaths paths)
 {
     private const string SessionHeaderName = "X-AniList-Manager-Session";
     private static readonly HashSet<string> ListStatuses = ["CURRENT", "PLANNING", "COMPLETED", "PAUSED", "DROPPED", "REPEATING"];
@@ -215,6 +215,36 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             await SendJsonAsync(context, 200, ReadPublicSettings().ToJsonString(JsonUtil.WriterOptions));
             return;
         }
+        if (method == "GET" && path == "/api/list-tabs")
+        {
+            var query = ParseQuery(context.Request.Url?.Query ?? "");
+            var type = NormalizeType(query.TryGetValue("type", out var typeValue) ? typeValue : "ANIME");
+            if (QueryFlag(query, "refresh"))
+            {
+                EnsureOnline("Custom list refresh is disabled while Offline Mode is active.");
+                var customLists = await aniList.CustomListsAsync(cancellationToken);
+                await SendJsonAsync(context, 200, listMetadata.ReplaceCustomListsFromRemote(customLists.Select(node => node?.GetValue<string>() ?? ""), type).ToJsonString(JsonUtil.WriterOptions));
+                return;
+            }
+            await SendJsonAsync(context, 200, listMetadata.ReadTabs(type).ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "PATCH" && path == "/api/list-tabs")
+        {
+            var query = ParseQuery(context.Request.Url?.Query ?? "");
+            var type = NormalizeType(query.TryGetValue("type", out var typeValue) ? typeValue : "ANIME");
+            var input = JsonNode.Parse(await ReadBodyAsync(context)) as JsonObject ?? new JsonObject();
+            if (input.ContainsKey("visibleTabs") || input.ContainsKey("defaultTab"))
+            {
+                listMetadata.SaveSettings(input);
+            }
+            if (input.ContainsKey("customLists") || input.ContainsKey("counts"))
+            {
+                listMetadata.UpdateMetadata(input, type);
+            }
+            await SendJsonAsync(context, 200, listMetadata.ReadTabs(type).ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
         if (method == "GET" && path == "/api/update")
         {
             await SendJsonAsync(context, 200, (await updates.GetAsync(false, cancellationToken)).ToJsonString(JsonUtil.WriterOptions));
@@ -237,25 +267,58 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             var appearanceInput = input["appearance"] as JsonObject;
             var updatesInput = input["updates"] as JsonObject;
             var advancedFiltersInput = input["advancedFilters"] as JsonObject;
+            var listsInput = input["lists"] as JsonObject;
+            var quickListsModeByTabInput = input["quickListsModeByTab"] as JsonObject;
+            if (input.ContainsKey("quickListsModeByTab") && quickListsModeByTabInput is null)
+            {
+                throw new ApiException("Quick Lists mode by tab must be an object.", 400);
+            }
             var showNotes = input.ContainsKey("showNotes")
                 ? JsonUtil.Bool(input, "showNotes") ?? throw new ApiException("Show Notes must be true or false.", 400)
                 : (bool?)null;
             var simplifiedView = input.ContainsKey("simplifiedView")
                 ? JsonUtil.Bool(input, "simplifiedView") ?? throw new ApiException("Simplified View must be true or false.", 400)
                 : (bool?)null;
-            if (watchNowInput is null && appearanceInput is null && updatesInput is null && advancedFiltersInput is null && showNotes is null && simplifiedView is null)
+            var quickListsMode = input.ContainsKey("quickListsMode")
+                ? (JsonUtil.String(input, "quickListsMode") ?? throw new ApiException("Quick Lists mode must be mini, full, or hidden.", 400))
+                : null;
+            if (watchNowInput is null && appearanceInput is null && updatesInput is null && advancedFiltersInput is null && listsInput is null && showNotes is null && simplifiedView is null && quickListsMode is null && quickListsModeByTabInput is null)
             {
-                throw new ApiException("Provide Appearance, Watch Now, Updates, Advanced Filters settings, Show Notes, or Simplified View.", 400);
+                throw new ApiException("Provide Appearance, Watch Now, Updates, Advanced Filters, Lists settings, Show Notes, Quick Lists mode, or Simplified View.", 400);
             }
-            if (appearanceInput is not null || updatesInput is not null || advancedFiltersInput is not null || showNotes.HasValue || simplifiedView.HasValue)
+            if (appearanceInput is not null || updatesInput is not null || advancedFiltersInput is not null || showNotes.HasValue || simplifiedView.HasValue || quickListsMode is not null || quickListsModeByTabInput is not null)
             {
-                tokens.SavePublicSettings(appearanceInput, updatesInput, showNotes, advancedFiltersInput, simplifiedView);
+                tokens.SavePublicSettings(appearanceInput, updatesInput, showNotes, advancedFiltersInput, simplifiedView, quickListsMode, quickListsModeByTabInput);
+            }
+            if (listsInput is not null)
+            {
+                listMetadata.SaveSettings(listsInput);
             }
             if (watchNowInput is not null)
             {
                 watchNow.SaveSettings(watchNowInput);
             }
             await SendJsonAsync(context, 200, ReadPublicSettings().ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "POST" && path == "/api/custom-lists")
+        {
+            EnsureOnline("Custom list changes are disabled while Offline Mode is active.");
+            var input = JsonNode.Parse(await ReadBodyAsync(context)) as JsonObject ?? new JsonObject();
+            var type = NormalizeType(JsonUtil.String(input, "type") ?? "ANIME");
+            var name = ListMetadataStore.NormalizeCustomListName(JsonUtil.String(input, "name"));
+            var customLists = await aniList.CreateCustomListAsync(name, type, cancellationToken);
+            await SendJsonAsync(context, 200, listMetadata.MergeCustomLists(customLists.Select(node => node?.GetValue<string>() ?? ""), type).ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "DELETE" && path.StartsWith("/api/custom-lists/", StringComparison.OrdinalIgnoreCase))
+        {
+            EnsureOnline("Custom list changes are disabled while Offline Mode is active.");
+            var query = ParseQuery(context.Request.Url?.Query ?? "");
+            var type = NormalizeType(query.TryGetValue("type", out var typeValue) ? typeValue : "ANIME");
+            var name = ListMetadataStore.NormalizeCustomListName(ParseTrailingText(path, "/api/custom-lists/"));
+            var customLists = await aniList.DeleteCustomListAsync(name, type, cancellationToken);
+            await SendJsonAsync(context, 200, listMetadata.ReplaceCustomListsFromRemote(customLists.Select(node => node?.GetValue<string>() ?? ""), type).ToJsonString(JsonUtil.WriterOptions));
             return;
         }
         if (method == "POST" && path == "/api/watch-now/servers")
@@ -370,6 +433,7 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             if (offline.IsEnabled)
             {
                 var offlineList = offline.GetList(status, type);
+                listMetadata.UpdateFromStatus(status, type, offlineList["entries"] as JsonArray ?? new JsonArray());
                 offlineList["diagnostics"] = new JsonObject
                 {
                     ["source"] = "local-offline",
@@ -387,6 +451,10 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
                 ? Math.Clamp(parsedPerChunk, 1, 500)
                 : (int?)null;
             var result = await aniList.GetListEntriesAsync(status, type, chunk, perChunk, cancellationToken);
+            if (!chunk.HasValue && !perChunk.HasValue)
+            {
+                listMetadata.UpdateFromStatus(status, type, result.Entries);
+            }
             result.Diagnostics["localApiMs"] = requestTimer.ElapsedMilliseconds;
             await SendJsonAsync(context, 200, new JsonObject
             {
@@ -476,20 +544,41 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
             var notes = JsonUtil.String(input, "notes");
             var progressProvided = input.ContainsKey("progress");
             var scoreProvided = input.ContainsKey("score");
-            if (!progressProvided && string.IsNullOrWhiteSpace(status) && !scoreProvided && !notesProvided)
+            var customListsProvided = input.ContainsKey("customLists");
+            string[]? customLists = null;
+            if (customListsProvided)
             {
-                throw new ApiException("Provide progress, status, score, notes, or a combination.", 400);
+                if (input["customLists"] is not JsonArray customListsInput)
+                {
+                    throw new ApiException("Custom Lists must be an array.", 400);
+                }
+                customLists = customListsInput
+                    .Select(item => ListMetadataStore.NormalizeCustomListName(item?.GetValue<string>()))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+            }
+            if (!progressProvided && string.IsNullOrWhiteSpace(status) && !scoreProvided && !notesProvided && !customListsProvided)
+            {
+                throw new ApiException("Provide progress, status, score, notes, customLists, or a combination.", 400);
             }
             if (status is not null)
             {
                 status = NormalizeStatus(status);
+            }
+            if (offline.IsEnabled && customListsProvided)
+            {
+                throw new ApiException("Custom list membership changes are disabled while Offline Mode is active.", 409);
             }
             if (offline.IsEnabled)
             {
                 await SendJsonAsync(context, 200, offline.QueueSaveEntry(mediaId, progress, progressProvided, status, score, scoreProvided, notes, notesProvided).ToJsonString(JsonUtil.WriterOptions));
                 return;
             }
-            var entry = await aniList.SaveEntryAsync(mediaId, progress, status, score, notes, notesProvided, cancellationToken);
+            var entry = await aniList.SaveEntryAsync(mediaId, progress, status, score, notes, notesProvided, customLists, customListsProvided, cancellationToken);
+            if (customListsProvided && customLists is not null)
+            {
+                listMetadata.MergeCustomLists(customLists, "ANIME");
+            }
             await SendJsonAsync(context, 200, new JsonObject { ["entry"] = entry }.ToJsonString(JsonUtil.WriterOptions));
             return;
         }
@@ -538,6 +627,37 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
                 .Where(update => update.MediaId > 0)
                 .ToArray();
             var entries = await aniList.SaveProgressEntriesAsync(requestedUpdates, cancellationToken);
+            await SendJsonAsync(context, 200, new JsonObject { ["updated"] = entries.Count, ["entries"] = entries }.ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+        if (method == "POST" && path == "/api/bulk/custom-lists")
+        {
+            var input = JsonNode.Parse(await ReadBodyAsync(context)) as JsonObject ?? new JsonObject();
+            var updates = input["updates"] as JsonArray ?? throw new ApiException("Provide updates.", 400);
+            if (offline.IsEnabled)
+            {
+                throw new ApiException("Custom list membership changes are disabled while Offline Mode is active.", 409);
+            }
+            var requestedUpdates = updates
+                .OfType<JsonObject>()
+                .Select(update =>
+                {
+                    var mediaId = JsonUtil.Int(update, "mediaId") ?? 0;
+                    var customListsInput = update["customLists"] as JsonArray ?? throw new ApiException("Custom Lists must be an array.", 400);
+                    var customLists = customListsInput
+                        .Select(item => ListMetadataStore.NormalizeCustomListName(item?.GetValue<string>()))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToArray();
+                    return (MediaId: mediaId, CustomLists: customLists);
+                })
+                .Where(update => update.MediaId > 0)
+                .ToArray();
+            var entries = new JsonArray();
+            foreach (var update in requestedUpdates)
+            {
+                entries.Add((JsonNode?)await aniList.SaveEntryAsync(update.MediaId, null, null, customLists: update.CustomLists, customListsProvided: true, cancellationToken: cancellationToken));
+                listMetadata.MergeCustomLists(update.CustomLists, "ANIME");
+            }
             await SendJsonAsync(context, 200, new JsonObject { ["updated"] = entries.Count, ["entries"] = entries }.ToJsonString(JsonUtil.WriterOptions));
             return;
         }
@@ -651,6 +771,7 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
     private JsonObject ReadPublicSettings()
     {
         var settings = tokens.ReadPublicSettings();
+        settings["lists"] = listMetadata.ReadPublicSettings();
         settings["watchNow"] = watchNow.ReadPublicSettings();
         settings["offline"] = offline.Status();
         return settings;
@@ -786,6 +907,16 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         return status;
     }
 
+    private static string NormalizeType(string value)
+    {
+        var type = value.ToUpperInvariant();
+        if (type != "ANIME")
+        {
+            throw new ApiException("Only ANIME lists are supported.", 400);
+        }
+        return type;
+    }
+
     private static int ParseTrailingInt(string path, string prefix)
     {
         var raw = path[prefix.Length..].Trim('/');
@@ -827,6 +958,13 @@ internal sealed class ApiServer(TokenStore tokens, WatchNowStore watchNow, AniLi
         }
         return result;
     }
+
+    private static bool QueryFlag(Dictionary<string, string> query, string name) =>
+        query.TryGetValue(name, out var value)
+        && (string.IsNullOrWhiteSpace(value)
+            || string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase));
 
     private static async Task<string> ReadBodyAsync(HttpListenerContext context)
     {

@@ -2,6 +2,4 @@
 
 # UI Improvements
 
-- Tagging.
-	 - Add a tagging area below 'Progress, Score, List' area.
-	 - Right click to add new tag with options to create tag and color.
+- [ ] Find out if there is an API for Upcoming series.

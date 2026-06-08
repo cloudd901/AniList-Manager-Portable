@@ -16,6 +16,10 @@ internal sealed class TokenStore(AppPaths paths)
     private static readonly HashSet<string> AccentThemes = ["blue", "teal", "rose"];
     private static readonly HashSet<string> AlertIcons = ["triangle", "beacon", "bolt", "dot", "green-dot"];
     private static readonly HashSet<string> ListStatuses = ["CURRENT", "PLANNING", "COMPLETED", "PAUSED", "DROPPED", "REPEATING"];
+    private static readonly HashSet<string> AdvancedFilterListTypes = ["status", "custom"];
+    private static readonly HashSet<string> QuickListsModes = ["mini", "full", "hidden"];
+    private const string AllStatus = "ALL";
+    private const string CustomTabPrefix = "CUSTOM:";
     private const int MaxSavedFilters = 50;
     private const int MaxSavedFilterNameLength = 80;
 
@@ -75,13 +79,15 @@ internal sealed class TokenStore(AppPaths paths)
         {
             ["showNotes"] = JsonUtil.Bool(config, "showNotes") ?? JsonUtil.Bool(config, "notesMode") == true,
             ["simplifiedView"] = JsonUtil.Bool(config, "simplifiedView") ?? false,
+            ["quickListsMode"] = NormalizeQuickListsMode(JsonUtil.String(config, "quickListsMode")),
+            ["quickListsModeByTab"] = NormalizeQuickListsModeByTab(config["quickListsModeByTab"] as JsonObject, false),
             ["appearance"] = PublicAppearance(appearance),
             ["updates"] = PublicUpdates(config["updates"] as JsonObject),
             ["advancedFilters"] = PublicAdvancedFilters(config["advancedFilters"] as JsonObject)
         };
     }
 
-    public JsonObject SavePublicSettings(JsonObject? appearanceInput = null, JsonObject? updatesInput = null, bool? showNotes = null, JsonObject? advancedFiltersInput = null, bool? simplifiedView = null)
+    public JsonObject SavePublicSettings(JsonObject? appearanceInput = null, JsonObject? updatesInput = null, bool? showNotes = null, JsonObject? advancedFiltersInput = null, bool? simplifiedView = null, string? quickListsMode = null, JsonObject? quickListsModeByTabInput = null)
     {
         var config = paths.ReadPortableConfig();
         if (showNotes.HasValue)
@@ -91,6 +97,14 @@ internal sealed class TokenStore(AppPaths paths)
         if (simplifiedView.HasValue)
         {
             config["simplifiedView"] = simplifiedView.Value;
+        }
+        if (quickListsMode is not null)
+        {
+            config["quickListsMode"] = ValidateQuickListsMode(quickListsMode);
+        }
+        if (quickListsModeByTabInput is not null)
+        {
+            config["quickListsModeByTab"] = NormalizeQuickListsModeByTab(quickListsModeByTabInput, true);
         }
         if (appearanceInput is not null)
         {
@@ -145,6 +159,60 @@ internal sealed class TokenStore(AppPaths paths)
         config["updatedAt"] = DateTimeOffset.UtcNow.ToString("O");
         paths.WritePortableConfig(config);
         return ReadPublicSettings();
+    }
+
+    private static string NormalizeQuickListsMode(string? value) =>
+        string.Equals(value, "full", StringComparison.OrdinalIgnoreCase)
+            ? "full"
+            : string.Equals(value, "hidden", StringComparison.OrdinalIgnoreCase)
+                ? "hidden"
+                : "mini";
+
+    private static string ValidateQuickListsMode(string? value)
+    {
+        var normalized = value?.Trim().ToLowerInvariant();
+        return normalized is not null && QuickListsModes.Contains(normalized)
+            ? normalized
+            : throw new ApiException("Quick Lists mode must be mini, full, or hidden.", 400);
+    }
+
+    private static JsonObject NormalizeQuickListsModeByTab(JsonObject? input, bool strict)
+    {
+        var modes = new JsonObject();
+        if (input is null)
+        {
+            return modes;
+        }
+
+        foreach (var property in input)
+        {
+            var key = property.Key.Trim();
+            if (!IsQuickListsModeTabKey(key))
+            {
+                if (strict)
+                {
+                    throw new ApiException("Quick Lists mode tab keys must be status values, ALL, or CUSTOM:<name>.", 400);
+                }
+                continue;
+            }
+
+            string mode;
+            try
+            {
+                mode = ValidateQuickListsMode(property.Value?.GetValue<string>());
+            }
+            catch
+            {
+                if (strict)
+                {
+                    throw;
+                }
+                continue;
+            }
+            modes[key] = mode;
+        }
+
+        return modes;
     }
 
     private static JsonObject PublicAppearance(JsonObject? appearance) => new()
@@ -203,6 +271,7 @@ internal sealed class TokenStore(AppPaths paths)
 
             var id = JsonUtil.String(filterNode, "id")?.Trim();
             var name = JsonUtil.String(filterNode, "name")?.Trim();
+            var listType = JsonUtil.String(filterNode, "listType")?.Trim().ToLowerInvariant();
             var filter = filterNode["filter"] as JsonObject;
             if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(name) || filter is null)
             {
@@ -228,25 +297,44 @@ internal sealed class TokenStore(AppPaths paths)
                 }
                 continue;
             }
+            if (!string.IsNullOrWhiteSpace(listType) && !AdvancedFilterListTypes.Contains(listType))
+            {
+                if (strict)
+                {
+                    throw new ApiException("Saved filter list type must be status or custom.", 400);
+                }
+                listType = null;
+            }
 
-            filters.Add((JsonNode?)new JsonObject
+            var normalizedFilter = new JsonObject
             {
                 ["id"] = id,
                 ["name"] = name,
                 ["filter"] = filter.DeepClone()
-            });
+            };
+            if (!string.IsNullOrWhiteSpace(listType))
+            {
+                normalizedFilter["listType"] = listType;
+            }
+            filters.Add((JsonNode?)normalizedFilter);
         }
 
         var defaultByStatus = new JsonObject();
         var defaultsInput = input["defaultByStatus"] as JsonObject;
         if (defaultsInput is not null)
         {
-            foreach (var status in ListStatuses)
+            foreach (var property in defaultsInput)
             {
-                var savedId = JsonUtil.String(defaultsInput, status)?.Trim();
+                var key = property.Key.Trim();
+                if (!IsAdvancedFilterDefaultKey(key))
+                {
+                    continue;
+                }
+
+                var savedId = property.Value?.GetValue<string>()?.Trim();
                 if (!string.IsNullOrWhiteSpace(savedId) && seenIds.Contains(savedId))
                 {
-                    defaultByStatus[status] = savedId;
+                    defaultByStatus[key] = savedId;
                 }
             }
         }
@@ -256,6 +344,38 @@ internal sealed class TokenStore(AppPaths paths)
             ["filters"] = filters,
             ["defaultByStatus"] = defaultByStatus
         };
+    }
+
+    private static bool IsAdvancedFilterDefaultKey(string key)
+    {
+        if (ListStatuses.Contains(key))
+        {
+            return true;
+        }
+
+        if (!key.StartsWith(CustomTabPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var name = key[CustomTabPrefix.Length..].Trim();
+        return name.Length is > 0 and <= MaxSavedFilterNameLength && !name.Any(char.IsControl);
+    }
+
+    private static bool IsQuickListsModeTabKey(string key)
+    {
+        if (key == AllStatus || ListStatuses.Contains(key))
+        {
+            return true;
+        }
+
+        if (!key.StartsWith(CustomTabPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var name = key[CustomTabPrefix.Length..].Trim();
+        return name.Length is > 0 and <= MaxSavedFilterNameLength && !name.Any(char.IsControl);
     }
 
     private static string NormalizedAppearanceValue(string? value, HashSet<string> allowedValues, string fallback)

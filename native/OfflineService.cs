@@ -294,7 +294,7 @@ internal sealed class OfflineService(AppPaths paths, AniListClient aniList, Avai
                         JsonUtil.Bool(item, "scoreProvided") == true ? JsonUtil.Double(item, "score") : null,
                         JsonUtil.Bool(item, "notesProvided") == true ? JsonUtil.String(item, "notes") : null,
                         JsonUtil.Bool(item, "notesProvided") == true,
-                        cancellationToken);
+                        cancellationToken: cancellationToken);
                 }
                 else if (kind == "deleteEntry")
                 {
