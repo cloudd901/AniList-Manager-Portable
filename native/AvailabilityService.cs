@@ -28,6 +28,7 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
 
     private sealed class JikanRateLimitException(string message) : Exception(message);
     private sealed record MatchSelection(JsonObject Candidate, double Score, string Confidence);
+    internal sealed record CachePreparation(JsonObject? CachedResult, bool Pending, string Reason);
     private sealed record SeedAvailabilityOverride(int MediaId, int Total, int Sub, int Dub, string Note, bool ForceComplete = false);
     private static readonly SeedAvailabilityOverride[] SeedAvailabilityOverrides =
     [
@@ -151,7 +152,7 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
             return overrideResult;
         }
 
-        if (IsUnreleased(entry))
+        if (IsUnreleased(entry) && !force)
         {
             return null;
         }
@@ -276,6 +277,7 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
                 return null;
             }
 
+            NormalizeCachedPolicy(entry, cached);
             if (IsCacheReusable(entry, cached, refresh))
             {
                 return cached.DeepClone().AsObject();
@@ -309,9 +311,56 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
 
         lock (cacheLock)
         {
-            return cache[mediaId.Value.ToString()] is JsonObject cached
-                ? cached.DeepClone().AsObject()
-                : null;
+            if (cache[mediaId.Value.ToString()] is not JsonObject cached)
+            {
+                return null;
+            }
+
+            NormalizeCachedPolicy(entry, cached);
+            return cached.DeepClone().AsObject();
+        }
+    }
+
+    public CachePreparation PrepareAutomaticAvailability(JsonObject entry, JsonObject cache)
+    {
+        var mediaId = JsonUtil.Int(entry, "mediaId");
+        if (mediaId is null)
+        {
+            return new CachePreparation(null, false, "invalid");
+        }
+
+        if (TryGetOverrideResult(entry) is { } overrideResult)
+        {
+            lock (cacheLock)
+            {
+                cache[mediaId.Value.ToString()] = overrideResult.DeepClone();
+            }
+            return new CachePreparation(overrideResult, false, "override");
+        }
+
+        if (IsUnreleased(entry))
+        {
+            return new CachePreparation(null, false, "unreleased");
+        }
+
+        lock (cacheLock)
+        {
+            if (cache[mediaId.Value.ToString()] is not JsonObject cached)
+            {
+                return new CachePreparation(null, true, "missing");
+            }
+
+            NormalizeCachedPolicy(entry, cached);
+            var saved = cached.DeepClone().AsObject();
+            if (!IsCacheUsable(entry, cached))
+            {
+                return new CachePreparation(saved, true, "stale");
+            }
+
+            return new CachePreparation(
+                saved,
+                false,
+                JsonUtil.Bool(cached, "cachePermanent") == true ? "permanent" : "fresh");
         }
     }
 
@@ -840,6 +889,27 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
         return result;
     }
 
+    private static void NormalizeCachedPolicy(JsonObject entry, JsonObject cached)
+    {
+        var permanent = IsPermanent(entry, cached);
+        var wasPermanent = JsonUtil.Bool(cached, "cachePermanent") == true;
+        cached["cachePermanent"] = permanent;
+        if (permanent)
+        {
+            cached["cacheExpiresAt"] = null;
+            return;
+        }
+
+        if (!wasPermanent && DateTimeOffset.TryParse(JsonUtil.String(cached, "cacheExpiresAt"), out _))
+        {
+            return;
+        }
+
+        cached["cacheExpiresAt"] = DateTimeOffset.TryParse(JsonUtil.String(cached, "checkedAt"), out var checkedAt)
+            ? checkedAt.Add(CacheTtl).ToString("O")
+            : DateTimeOffset.UtcNow.Subtract(CacheTtl).ToString("O");
+    }
+
     private static bool IsCacheUsable(JsonObject entry, JsonObject cached)
     {
         if (JsonUtil.Bool(cached, "cachePermanent") == true && JsonUtil.String(cached, "matchConfidence") != "high")
@@ -869,25 +939,12 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
             return IsCacheUsable(entry, cached);
         }
 
-        return IsPermanent(entry, cached) || (JsonUtil.Bool(cached, "cachePermanent") == true && JsonUtil.String(cached, "matchConfidence") == "high") || HasCompleteSubDub(cached);
-    }
-
-    private static bool HasCompleteSubDub(JsonObject result)
-    {
-        if (JsonUtil.String(result, "status") != "found")
-        {
-            return false;
-        }
-
-        var total = JsonUtil.Int(result, "totalEpisodes") ?? 0;
-        var sub = JsonUtil.Int(result, "subEpisodes") ?? 0;
-        var dub = JsonUtil.Int(result, "dubEpisodes") ?? 0;
-        return total > 0 && sub == total && dub == total && JsonUtil.String(result, "matchConfidence") == "high";
+        return IsPermanent(entry, cached) || (JsonUtil.Bool(cached, "cachePermanent") == true && JsonUtil.String(cached, "matchConfidence") == "high");
     }
 
     private static bool IsPermanent(JsonObject entry, JsonObject result)
     {
-        if (JsonUtil.String(entry, "status") != "COMPLETED" || JsonUtil.String(result, "status") != "found")
+        if (!IsFinished(entry) || JsonUtil.String(result, "status") != "found")
         {
             return false;
         }

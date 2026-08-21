@@ -78,10 +78,13 @@ const ADVANCED_FILTER_VERSION = 1;
 const ADD_SEARCH_LIMIT_OPTIONS = ["all", "200", "100", "50", "20"];
 const LIST_CHUNK_SIZE = 100;
 const AVAILABILITY_CHUNK_SIZE = 25;
+const AVAILABILITY_REMOTE_CHUNK_SIZE = 6;
 const RATING_CHUNK_SIZE = 4;
 const RATING_BATCH_DELAY_MS = 500;
 const AUTO_AVAILABILITY_COOLDOWN_MS = 60 * 60 * 1000;
+const AUTO_AVAILABILITY_DEFERRED_COOLDOWN_MS = 15 * 60 * 1000;
 const AUTO_AVAILABILITY_STORAGE_PREFIX = "anilist-manager:auto-availability:";
+const AUTO_AVAILABILITY_DEFERRED_STORAGE_PREFIX = "anilist-manager:auto-availability-deferred:";
 const BULK_PROGRESS_CHUNK_SIZE = 12;
 const COLOR_MODES = [
   { value: "light", label: "Light" },
@@ -1312,22 +1315,52 @@ function availabilityRequestEntries(entries) {
   }));
 }
 
+function availabilityConsoleRows(entries) {
+  return entries.map((entry) => ({
+    mediaId: entry.mediaId,
+    title: entry.title,
+    listStatus: entry.status,
+    mediaStatus: entry.mediaStatus,
+    totalEpisodes: entry.totalEpisodes ?? "?"
+  }));
+}
+
+function logAvailabilityRecheckQueue(entries, automatic) {
+  const mode = automatic ? "Automatic" : "Manual";
+  console.groupCollapsed(`[Availability] ${mode} re-check queued ${entries.length} item${entries.length === 1 ? "" : "s"}.`);
+  if (entries.length > 0) {
+    console.table(availabilityConsoleRows(entries));
+  } else {
+    console.info("No provider lookups are needed.");
+  }
+  console.groupEnd();
+}
+
 function autoAvailabilityStorageKey(status) {
   return `${AUTO_AVAILABILITY_STORAGE_PREFIX}${status}`;
+}
+
+function autoAvailabilityDeferredStorageKey(status) {
+  return `${AUTO_AVAILABILITY_DEFERRED_STORAGE_PREFIX}${status}`;
 }
 
 function hasRecentAutoAvailability(status) {
   try {
     const checkedAt = Number(window.localStorage.getItem(autoAvailabilityStorageKey(status)));
-    return Number.isFinite(checkedAt) && Date.now() - checkedAt < AUTO_AVAILABILITY_COOLDOWN_MS;
+    const deferredAt = Number(window.localStorage.getItem(autoAvailabilityDeferredStorageKey(status)));
+    return (Number.isFinite(checkedAt) && Date.now() - checkedAt < AUTO_AVAILABILITY_COOLDOWN_MS)
+      || (Number.isFinite(deferredAt) && Date.now() - deferredAt < AUTO_AVAILABILITY_DEFERRED_COOLDOWN_MS);
   } catch {
     return false;
   }
 }
 
-function markAutoAvailability(status) {
+function markAutoAvailability(status, deferred = false) {
   try {
-    window.localStorage.setItem(autoAvailabilityStorageKey(status), String(Date.now()));
+    const key = deferred ? autoAvailabilityDeferredStorageKey(status) : autoAvailabilityStorageKey(status);
+    const staleKey = deferred ? autoAvailabilityStorageKey(status) : autoAvailabilityDeferredStorageKey(status);
+    window.localStorage.setItem(key, String(Date.now()));
+    window.localStorage.removeItem(staleKey);
   } catch {
     // Continue when browser storage is unavailable.
   }
@@ -5022,7 +5055,7 @@ function App() {
   const [availability, setAvailability] = useState({});
   const [ratings, setRatings] = useState({});
   const [availabilityLoading, setAvailabilityLoading] = useState(false);
-  const [availabilityProgress, setAvailabilityProgress] = useState({ checked: 0, total: 0 });
+  const [availabilityProgress, setAvailabilityProgress] = useState({ checked: 0, total: 0, phase: "idle" });
   const [availabilityWarning, setAvailabilityWarning] = useState("");
   const [loadDiagnostics, setLoadDiagnostics] = useState("");
   const [loadProgress, setLoadProgress] = useState("");
@@ -5335,7 +5368,7 @@ function App() {
         setUser(null);
         setEntries([]);
         setAvailability({});
-        setAvailabilityProgress({ checked: 0, total: 0 });
+        setAvailabilityProgress({ checked: 0, total: 0, phase: "idle" });
         setAvailabilityWarning("");
         setLoadDiagnostics("");
         setLoadProgress("");
@@ -5370,7 +5403,7 @@ function App() {
       setOffline(firstPayload.offline ? { ...(healthPayload.offline || {}), enabled: true, queued: firstPayload.queued ?? healthPayload.offline?.queued ?? 0 } : healthPayload.offline || { enabled: false, queued: 0 });
       setAvailability(mergedAvailability);
       setRatings(mergedRatings);
-      setAvailabilityProgress({ checked: 0, total: 0 });
+      setAvailabilityProgress({ checked: 0, total: 0, phase: "idle" });
       setAvailabilityWarning("");
       setLoadDiagnostics(isListStatus(status)
         ? formatLoadDiagnostics(firstPayload.diagnostics)
@@ -5379,10 +5412,12 @@ function App() {
       setSelectedIds(new Set());
       if (!firstPayload.offline && !simplifiedView) {
         const cacheOnly = hasRecentAutoAvailability(status);
-        if (!cacheOnly) {
-          markAutoAvailability(status);
-        }
-        loadAvailability(tabEntries, false, { cacheOnly, preloadReusableCache: true, background: cacheOnly });
+        loadAvailability(tabEntries, false, {
+          cacheOnly,
+          automatic: !cacheOnly,
+          autoStatus: status,
+          background: cacheOnly
+        });
         loadRatings(tabEntries);
       }
     } catch (loadError) {
@@ -5391,7 +5426,7 @@ function App() {
       }
       setEntries([]);
       setAvailability({});
-      setAvailabilityProgress({ checked: 0, total: 0 });
+      setAvailabilityProgress({ checked: 0, total: 0, phase: "idle" });
       setAvailabilityWarning("");
       setLoadDiagnostics(loadError.details?.source ? `${loadError.details.source}: ${loadError.message}` : "");
       setLoadProgress("");
@@ -5438,7 +5473,7 @@ function App() {
     }
     setAvailability({});
     setAvailabilityLoading(false);
-    setAvailabilityProgress({ checked: 0, total: 0 });
+    setAvailabilityProgress({ checked: 0, total: 0, phase: "idle" });
     setAvailabilityWarning("");
     setLoadDiagnostics("");
     setLoadProgress("");
@@ -5725,13 +5760,56 @@ function App() {
     const showProgress = !options.background;
     const forceRefresh = options.force === true;
     const cacheOnly = options.cacheOnly === true;
-    const preloadReusableCache = options.preloadReusableCache === true && !cacheOnly;
+    const automatic = options.automatic === true && !cacheOnly;
+    const preloadReusableCache = options.preloadReusableCache === true && !cacheOnly && !automatic;
     setAvailabilityLoading(showProgress);
-    setAvailabilityProgress({ checked: 0, total: showProgress && !preloadReusableCache ? entriesToCheck.length : 0 });
+    setAvailabilityProgress({
+      checked: 0,
+      total: showProgress && !preloadReusableCache && !automatic ? entriesToCheck.length : 0,
+      phase: showProgress && (preloadReusableCache || automatic) ? "preparing" : "checking"
+    });
     setAvailabilityWarning("");
     try {
       let entriesForRefresh = entriesToCheck;
-      if (preloadReusableCache && entriesToCheck.length > 0) {
+      if (automatic && entriesToCheck.length > 0) {
+        const pendingMediaIds = new Set();
+        for (let index = 0; index < entriesToCheck.length; index += AVAILABILITY_CHUNK_SIZE) {
+          const chunk = entriesToCheck.slice(index, index + AVAILABILITY_CHUNK_SIZE);
+          const payload = await api("/api/availability/batch", {
+            method: "POST",
+            signal: abortController.signal,
+            body: JSON.stringify({
+              prepareOnly: true,
+              automatic: true,
+              entries: availabilityRequestEntries(chunk)
+            })
+          });
+          if (availabilityRunId.current !== runId) {
+            return false;
+          }
+          const cachedEntries = payload.entries || [];
+          for (const mediaId of payload.pendingMediaIds || []) {
+            pendingMediaIds.add(mediaId);
+          }
+          if (cachedEntries.length > 0) {
+            setAvailability((currentAvailability) => ({
+              ...currentAvailability,
+              ...Object.fromEntries(cachedEntries.map((entry) => [entry.mediaId, entry]))
+            }));
+          }
+        }
+        entriesForRefresh = entriesToCheck.filter((entry) => pendingMediaIds.has(entry.mediaId));
+        if (showProgress) {
+          setAvailabilityProgress({ checked: 0, total: entriesForRefresh.length, phase: "checking" });
+        }
+        if (entriesForRefresh.length === 0) {
+          logAvailabilityRecheckQueue(entriesForRefresh, automatic);
+          if (options.autoStatus) {
+            markAutoAvailability(options.autoStatus);
+          }
+          return true;
+        }
+      } else if (preloadReusableCache && entriesToCheck.length > 0) {
         const reusableMediaIds = new Set();
         for (let index = 0; index < entriesToCheck.length; index += AVAILABILITY_CHUNK_SIZE) {
           const chunk = entriesToCheck.slice(index, index + AVAILABILITY_CHUNK_SIZE);
@@ -5740,6 +5818,7 @@ function App() {
             signal: abortController.signal,
             body: JSON.stringify({
               usableCacheOnly: true,
+              refresh,
               entries: availabilityRequestEntries(chunk)
             })
           });
@@ -5759,17 +5838,31 @@ function App() {
         }
         entriesForRefresh = entriesToCheck.filter((entry) => !reusableMediaIds.has(entry.mediaId));
         if (showProgress) {
-          setAvailabilityProgress({ checked: 0, total: entriesForRefresh.length });
+          setAvailabilityProgress({ checked: 0, total: entriesForRefresh.length, phase: "checking" });
           if (entriesForRefresh.length === 0) {
+            logAvailabilityRecheckQueue(entriesForRefresh, automatic);
             setAvailabilityLoading(false);
             return true;
           }
         }
       }
 
+      if (!cacheOnly) {
+        logAvailabilityRecheckQueue(entriesForRefresh, automatic);
+      }
       let index = 0;
+      const requestChunkSize = cacheOnly ? AVAILABILITY_CHUNK_SIZE : AVAILABILITY_REMOTE_CHUNK_SIZE;
       while (index < entriesForRefresh.length) {
-        const chunk = entriesForRefresh.slice(index, index + AVAILABILITY_CHUNK_SIZE);
+        const chunk = entriesForRefresh.slice(index, index + requestChunkSize);
+        if (!cacheOnly) {
+          const mode = automatic ? "Automatic" : "Manual";
+          const batchNumber = Math.floor(index / requestChunkSize) + 1;
+          const batchCount = Math.ceil(entriesForRefresh.length / requestChunkSize);
+          console.info(
+            `[Availability] ${mode} re-check batch ${batchNumber}/${batchCount}`,
+            chunk.map((entry) => `${entry.mediaId}: ${entry.title}`)
+          );
+        }
         const payload = await api("/api/availability/batch", {
           method: "POST",
           signal: abortController.signal,
@@ -5777,6 +5870,7 @@ function App() {
             refresh,
             force: forceRefresh,
             cacheOnly,
+            automatic,
             entries: availabilityRequestEntries(chunk)
           })
         });
@@ -5788,23 +5882,58 @@ function App() {
           ...Object.fromEntries(payload.entries.map((entry) => [entry.mediaId, entry]))
         }));
         if (showProgress) {
-          const completedEntries = Number(payload.checked || 0) + Number(payload.cached || 0);
+          const deferredInChunk = (payload.deferredMediaIds || []).length;
+          const completedEntries = automatic
+            ? Math.max(0, chunk.length - deferredInChunk)
+            : Number(payload.checked || 0) + Number(payload.cached || 0);
           setAvailabilityLoading(true);
           setAvailabilityProgress({
-            checked: Math.min(index + Math.max(completedEntries, payload.entries?.length || chunk.length), entriesForRefresh.length),
-            total: entriesForRefresh.length
+            checked: Math.min(
+              index + (automatic ? completedEntries : Math.max(completedEntries, payload.entries?.length || chunk.length)),
+              entriesForRefresh.length
+            ),
+            total: entriesForRefresh.length,
+            phase: "checking"
           });
+        }
+        if (automatic && payload.deferred) {
+          const completed = Math.min(index + Math.max(0, chunk.length - (payload.deferredMediaIds || []).length), entriesForRefresh.length);
+          const deferredCount = entriesForRefresh.length - completed;
+          const reason = payload.deferredReason === "rate_limited" ? "rate limited" : "temporarily unavailable";
+          const deferredIds = new Set(payload.deferredMediaIds || []);
+          const deferredEntries = [
+            ...chunk.filter((entry) => deferredIds.has(entry.mediaId)),
+            ...entriesForRefresh.slice(index + chunk.length)
+          ];
+          console.warn(
+            `[Availability] Automatic re-check deferred ${deferredCount} item${deferredCount === 1 ? "" : "s"} (${payload.deferredReason || "provider_unavailable"}).`,
+            availabilityConsoleRows(deferredEntries)
+          );
+          setAvailabilityWarning(`Availability provider is ${reason}. Checked ${completed}/${entriesForRefresh.length}; deferred ${deferredCount}. Cached values were kept.`);
+          if (options.autoStatus) {
+            markAutoAvailability(options.autoStatus, true);
+          }
+          return false;
         }
         index += chunk.length;
         if (payload.rateLimited) {
           setAvailabilityWarning("Availability provider is rate limited. Results may be slower or incomplete.");
         }
       }
+      if (automatic && options.autoStatus) {
+        markAutoAvailability(options.autoStatus);
+      }
+      if (!cacheOnly) {
+        console.info(`[Availability] ${automatic ? "Automatic" : "Manual"} re-check completed ${entriesForRefresh.length} item${entriesForRefresh.length === 1 ? "" : "s"}.`);
+      }
       return true;
     } catch (availabilityError) {
       if (availabilityRunId.current === runId) {
         if (availabilityError.name !== "AbortError") {
           setAvailabilityWarning(availabilityError.message);
+          if (automatic && options.autoStatus) {
+            markAutoAvailability(options.autoStatus, true);
+          }
         }
       }
       return false;
@@ -5900,7 +6029,7 @@ function App() {
       return;
     }
     const targets = actionTargetEntries();
-    const forceSelectedAll = mode === "all" && selectedIds.size > 0;
+    const forceAll = mode === "all";
     const eligibleEntries = mode === "missing"
       ? targets.filter((entry) => isAvailabilityMissing(availability[entry.mediaId]))
       : mode === "airing"
@@ -5913,16 +6042,16 @@ function App() {
         : "No missing availability entries in the current target set.");
       return;
     }
-    const entriesToRefresh = forceSelectedAll
+    const entriesToRefresh = forceAll
       ? eligibleEntries.filter((entry) => !isLocalAvailabilityOverride(availability[entry.mediaId]))
       : eligibleEntries.filter((entry) => !isPermanentAvailability(availability[entry.mediaId]));
     if (entriesToRefresh.length === 0) {
-      setAvailabilityWarning(forceSelectedAll
-        ? "Selected entries are local availability overrides. Clear overrides before rechecking provider availability."
+      setAvailabilityWarning(forceAll
+        ? "The current target entries are local availability overrides. Clear overrides before rechecking provider availability."
         : "No non-permanent availability entries in the current target set.");
       return;
     }
-    loadAvailability(entriesToRefresh, true, { force: true, preloadReusableCache: !forceSelectedAll });
+    loadAvailability(entriesToRefresh, true, { force: true, preloadReusableCache: true });
   }
 
   async function recheckEpisodes() {
@@ -6211,10 +6340,12 @@ function App() {
     }
 
     const cacheOnly = hasRecentAutoAvailability(activeStatus);
-    if (!cacheOnly) {
-      markAutoAvailability(activeStatus);
-    }
-    loadAvailability(entries, false, { cacheOnly, preloadReusableCache: true, background: cacheOnly });
+    loadAvailability(entries, false, {
+      cacheOnly,
+      automatic: !cacheOnly,
+      autoStatus: activeStatus,
+      background: cacheOnly
+    });
     loadRatings(entries);
   }, [activeStatus, entries, isAddTab, offlineEnabled, settingsLoaded, simplifiedView]);
 
@@ -6904,7 +7035,9 @@ function App() {
                 title={recheckEpisodesTitle}
               >
                 {availabilityLoading
-                  ? (availabilityProgress.total > 0 ? `Checking ${availabilityProgress.checked}/${availabilityProgress.total}...` : "Checking...")
+                  ? (availabilityProgress.phase === "preparing"
+                    ? "Preparing availability..."
+                    : availabilityProgress.total > 0 ? `Checking ${availabilityProgress.checked}/${availabilityProgress.total}...` : "Checking...")
                   : "Recheck Episodes"}
               </button>
               {availabilityLoading ? (

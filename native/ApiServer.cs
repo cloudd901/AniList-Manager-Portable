@@ -481,7 +481,7 @@ internal sealed class ApiServer(TokenStore tokens, ListMetadataStore listMetadat
             }
             var list = await aniList.GetListEntriesAsync(status, type, cancellationToken: cancellationToken);
             var cacheOnly = query.TryGetValue("cacheOnly", out var cacheOnlyValue) && cacheOnlyValue.Equals("true", StringComparison.OrdinalIgnoreCase);
-            await SendAvailabilityAsync(context, list.Entries, refresh, false, cacheOnly, false, status, type, cancellationToken);
+            await SendAvailabilityAsync(context, list.Entries, refresh, false, cacheOnly, false, false, false, status, type, cancellationToken);
             return;
         }
         if (method == "GET" && path == "/api/availability/overrides")
@@ -502,7 +502,9 @@ internal sealed class ApiServer(TokenStore tokens, ListMetadataStore listMetadat
             var force = JsonUtil.Bool(input, "force") == true;
             var cacheOnly = JsonUtil.Bool(input, "cacheOnly") == true;
             var usableCacheOnly = JsonUtil.Bool(input, "usableCacheOnly") == true;
-            await SendAvailabilityAsync(context, entries, refresh, force, cacheOnly, usableCacheOnly, null, null, cancellationToken);
+            var prepareOnly = JsonUtil.Bool(input, "prepareOnly") == true;
+            var automatic = JsonUtil.Bool(input, "automatic") == true;
+            await SendAvailabilityAsync(context, entries, refresh, force, cacheOnly, usableCacheOnly, prepareOnly, automatic, null, null, cancellationToken);
             return;
         }
         if (method == "POST" && path == "/api/ratings/batch")
@@ -785,7 +787,7 @@ internal sealed class ApiServer(TokenStore tokens, ListMetadataStore listMetadat
         }
     }
 
-    private async Task SendAvailabilityAsync(HttpListenerContext context, JsonArray entries, bool refresh, bool force, bool cacheOnly, bool usableCacheOnly, string? status, string? type, CancellationToken cancellationToken)
+    private async Task SendAvailabilityAsync(HttpListenerContext context, JsonArray entries, bool refresh, bool force, bool cacheOnly, bool usableCacheOnly, bool prepareOnly, bool automatic, string? status, string? type, CancellationToken cancellationToken)
     {
         if (entries.Count > 25 && status is null)
         {
@@ -796,17 +798,86 @@ internal sealed class ApiServer(TokenStore tokens, ListMetadataStore listMetadat
         var warnings = new JsonArray();
         var results = new JsonArray();
         var warningLock = new object();
+        var deferredLock = new object();
         var cachedCount = 0;
         var checkedCount = 0;
+        var deferredMediaIds = new HashSet<int>();
+        var pendingMediaIds = new JsonArray();
+        var skipped = new JsonObject
+        {
+            ["fresh"] = 0,
+            ["permanent"] = 0,
+            ["override"] = 0,
+            ["unreleased"] = 0,
+            ["invalid"] = 0
+        };
+        var pending = new JsonObject
+        {
+            ["stale"] = 0,
+            ["missing"] = 0
+        };
+
+        if (prepareOnly)
+        {
+            foreach (var entry in entries.OfType<JsonObject>())
+            {
+                var preparation = availability.PrepareAutomaticAvailability(entry, cache);
+                if (preparation.CachedResult is not null)
+                {
+                    results.Add((JsonNode?)preparation.CachedResult);
+                    cachedCount += 1;
+                }
+
+                if (preparation.Pending)
+                {
+                    if (JsonUtil.Int(entry, "mediaId") is { } pendingMediaId)
+                    {
+                        pendingMediaIds.Add((JsonNode?)pendingMediaId);
+                    }
+                    pending[preparation.Reason] = (JsonUtil.Int(pending, preparation.Reason) ?? 0) + 1;
+                }
+                else
+                {
+                    skipped[preparation.Reason] = (JsonUtil.Int(skipped, preparation.Reason) ?? 0) + 1;
+                }
+            }
+
+            availability.WriteCache(cache);
+            await SendJsonAsync(context, 200, new JsonObject
+            {
+                ["source"] = "local-cache",
+                ["entries"] = results,
+                ["pendingMediaIds"] = pendingMediaIds,
+                ["skipped"] = skipped,
+                ["pending"] = pending,
+                ["cached"] = cachedCount,
+                ["checked"] = 0,
+                ["prepareOnly"] = true,
+                ["automatic"] = automatic,
+                ["deferred"] = false,
+                ["deferredMediaIds"] = new JsonArray()
+            }.ToJsonString(JsonUtil.WriterOptions));
+            return;
+        }
+
+        using var automaticTimeout = automatic
+            ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+            : null;
+        automaticTimeout?.CancelAfter(TimeSpan.FromSeconds(30));
+        var operationToken = automaticTimeout?.Token ?? cancellationToken;
+        string? automaticFailureReason = null;
         var semaphore = new SemaphoreSlim(6);
         var tasks = entries.OfType<JsonObject>().Select(async entry =>
         {
-            await semaphore.WaitAsync(cancellationToken);
+            var semaphoreEntered = false;
+            JsonObject? savedBeforeRefresh = null;
             try
             {
+                await semaphore.WaitAsync(operationToken);
+                semaphoreEntered = true;
                 if (usableCacheOnly)
                 {
-                    var reusableCachedOnly = availability.GetReusableCachedResult(entry, false, cache);
+                    var reusableCachedOnly = availability.GetReusableCachedResult(entry, refresh, cache);
                     if (reusableCachedOnly is not null)
                     {
                         Interlocked.Increment(ref cachedCount);
@@ -834,16 +905,43 @@ internal sealed class ApiServer(TokenStore tokens, ListMetadataStore listMetadat
                     }
                 }
 
-                if (availability.SuppressesAutomaticAvailability(entry))
+                if (automatic && availability.SuppressesAutomaticAvailability(entry))
                 {
                     return null;
                 }
 
+                if (automatic)
+                {
+                    savedBeforeRefresh = availability.GetCachedResult(entry, cache);
+                }
                 Interlocked.Increment(ref checkedCount);
-                return await availability.ResolveAsync(entry, refresh, cache, cancellationToken, force);
+                return await availability.ResolveAsync(entry, refresh, cache, operationToken, force);
+            }
+            catch (OperationCanceledException) when (automatic && !cancellationToken.IsCancellationRequested)
+            {
+                lock (deferredLock)
+                {
+                    automaticFailureReason ??= "timeout";
+                }
+                AddDeferred(entry, "Automatic availability lookup was deferred.");
+                return savedBeforeRefresh;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception error)
             {
+                if (automatic)
+                {
+                    lock (deferredLock)
+                    {
+                        automaticFailureReason ??= IsRateLimitError(error.Message) ? "rate_limited" : "provider_unavailable";
+                    }
+                    AddDeferred(entry, error.Message);
+                    automaticTimeout?.Cancel();
+                    return savedBeforeRefresh;
+                }
                 lock (warningLock)
                 {
                     warnings.Add((JsonNode?)new JsonObject
@@ -857,7 +955,31 @@ internal sealed class ApiServer(TokenStore tokens, ListMetadataStore listMetadat
             }
             finally
             {
-                semaphore.Release();
+                if (semaphoreEntered)
+                {
+                    semaphore.Release();
+                }
+            }
+
+            void AddDeferred(JsonObject deferredEntry, string message)
+            {
+                var mediaId = JsonUtil.Int(deferredEntry, "mediaId");
+                if (mediaId is not null)
+                {
+                    lock (deferredLock)
+                    {
+                        deferredMediaIds.Add(mediaId.Value);
+                    }
+                }
+                lock (warningLock)
+                {
+                    warnings.Add((JsonNode?)new JsonObject
+                    {
+                        ["mediaId"] = mediaId,
+                        ["title"] = JsonUtil.String(deferredEntry, "title"),
+                        ["error"] = message
+                    });
+                }
             }
         }).ToArray();
 
@@ -871,9 +993,9 @@ internal sealed class ApiServer(TokenStore tokens, ListMetadataStore listMetadat
         availability.WriteCache(cache);
         var warningCount = warnings.Count;
         var rateLimited = warnings.OfType<JsonObject>().Any(warning =>
-            (JsonUtil.String(warning, "error") ?? "").Contains("429", StringComparison.OrdinalIgnoreCase) ||
-            (JsonUtil.String(warning, "error") ?? "").Contains("rate limit", StringComparison.OrdinalIgnoreCase) ||
-            (JsonUtil.String(warning, "error") ?? "").Contains("rate_limited", StringComparison.OrdinalIgnoreCase));
+            IsRateLimitError(JsonUtil.String(warning, "error") ?? ""));
+        var deferred = deferredMediaIds.Count > 0;
+        var deferredReason = deferred ? automaticFailureReason ?? (rateLimited ? "rate_limited" : "provider_unavailable") : null;
 
         var response = new JsonObject
         {
@@ -887,7 +1009,12 @@ internal sealed class ApiServer(TokenStore tokens, ListMetadataStore listMetadat
             ["checked"] = checkedCount,
             ["force"] = force,
             ["cacheOnly"] = cacheOnly,
-            ["usableCacheOnly"] = usableCacheOnly
+            ["usableCacheOnly"] = usableCacheOnly,
+            ["prepareOnly"] = prepareOnly,
+            ["automatic"] = automatic,
+            ["deferred"] = deferred,
+            ["deferredMediaIds"] = new JsonArray(deferredMediaIds.OrderBy(id => id).Select(id => (JsonNode?)id).ToArray()),
+            ["deferredReason"] = deferredReason
         };
         if (status is not null)
         {
@@ -896,6 +1023,11 @@ internal sealed class ApiServer(TokenStore tokens, ListMetadataStore listMetadat
         }
         await SendJsonAsync(context, 200, response.ToJsonString(JsonUtil.WriterOptions));
     }
+
+    private static bool IsRateLimitError(string message) =>
+        message.Contains("429", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("rate limit", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("rate_limited", StringComparison.OrdinalIgnoreCase);
 
     private static string NormalizeStatus(string value)
     {
