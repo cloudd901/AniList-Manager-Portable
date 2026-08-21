@@ -148,7 +148,9 @@ Availability counts are best-effort metadata. Provider matches can be incomplete
 
 MAL content rating pills such as `PG-13`, `R`, and `R+` are loaded separately from AniList. Successful rating lookups are reused from `data\mal-cache.json` on later loads instead of periodically refetching the rating. Rating lookup failures do not block list loading.
 
-`Recheck Episodes` refreshes non-permanent entries and skips cached entries marked as permanent high-confidence matches or local overrides. The refresh dialog can target missing entries, airing or dub-behind-sub entries, or the current target set. While a refresh is running, the toolbar shows checked/total progress and a stop button can cancel the remaining queue.
+Automatic episode checks load saved counts first, permanently reuse high-confidence completed availability for finished anime, and omit unreleased titles from the provider queue. If the provider is slow or unavailable, the automatic check stops early and keeps the saved counts for a later retry.
+
+`Recheck Episodes` refreshes non-permanent entries and skips cached entries marked as permanent high-confidence matches or local overrides. The refresh dialog can target missing entries, airing or dub-behind-sub entries, or the current target set. Manual checks remain cancellable and can force selected entries to refresh.
 
 ## Watch Now Settings
 
@@ -227,6 +229,7 @@ The Donate button opens PayPal in your browser at `https://www.paypal.com/donate
 Development requires Node.js/npm for the React UI and the .NET 9 SDK for the native app.
 
 - Run `npm run build` from `web\` for a quick frontend build check.
+- Run `dotnet run --project tests\AniListManagerPortable.Tests.csproj -c Release` for deterministic availability cache-policy tests.
 - Run `scripts\rebuild-release-test.ps1` to rebuild `release\AniListManagerPortable` for local release testing without creating a ZIP. It preserves `release\AniListManagerPortable\data` and `.runtime`.
 - Run `scripts\build-release.ps1` only when creating a packaged ZIP release.
 - Native AOT publishing requires MSVC `link.exe`. If it is unavailable, the release script falls back to a trimmed self-contained single-file executable.

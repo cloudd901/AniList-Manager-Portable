@@ -4,9 +4,13 @@ namespace AniListManagerPortable;
 
 internal sealed class AppPaths
 {
-    public AppPaths()
+    public AppPaths() : this(Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar))
     {
-        Root = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+    }
+
+    internal AppPaths(string root)
+    {
+        Root = Path.GetFullPath(root);
         DataDir = Path.Combine(Root, "data");
         ConfigPath = Path.Combine(DataDir, "config.json");
         ListMetadataPath = Path.Combine(DataDir, "list-metadata.json");
