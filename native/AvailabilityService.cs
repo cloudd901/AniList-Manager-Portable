@@ -4,7 +4,27 @@ using System.Text.RegularExpressions;
 
 namespace AniListManagerPortable;
 
-internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
+internal sealed class AvailabilityProviderException : Exception
+{
+    internal AvailabilityProviderException(
+        string provider,
+        string reason,
+        string message,
+        Exception? innerException = null,
+        TimeSpan? retryAfter = null)
+        : base(message, innerException)
+    {
+        Provider = provider;
+        Reason = reason;
+        RetryAfter = retryAfter;
+    }
+
+    internal string Provider { get; }
+    internal string Reason { get; }
+    internal TimeSpan? RetryAfter { get; }
+}
+
+internal sealed class AvailabilityService
 {
     private const string HostedApi = "https://allanime-api.shashankbhake.codes";
     private const string AllAnimeGraphQl = "https://api.allanime.day/api";
@@ -19,12 +39,16 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
     private readonly object overrideLock = new();
     private readonly object malCacheLock = new();
     private readonly object jikanLock = new();
-    private readonly object throttleLock = new();
+    private readonly HttpClient http;
+    private readonly AppPaths paths;
+    private readonly Func<DateTimeOffset> providerUtcNow;
+    private readonly object providerStateLock = new();
+    private readonly SemaphoreSlim hostedProbeGate = new(1, 1);
+    private bool hostedProviderHealthy;
     private DateTimeOffset hostedProviderDisabledUntil = DateTimeOffset.MinValue;
-    private DateTimeOffset providerCooldownUntil = DateTimeOffset.MinValue;
+    private DateTimeOffset directProviderRateLimitedUntil = DateTimeOffset.MinValue;
     private DateTimeOffset nextJikanRequestAt = DateTimeOffset.MinValue;
     private DateTimeOffset jikanCooldownUntil = DateTimeOffset.MinValue;
-    private int providerFailureStreak;
 
     private sealed class JikanRateLimitException(string message) : Exception(message);
     private sealed record MatchSelection(JsonObject Candidate, double Score, string Confidence);
@@ -42,6 +66,13 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
         new(100, 13, 13, 13, "Miruro verified"),
         new(102663, 28, 28, 28, "Miruro verified")
     ];
+
+    internal AvailabilityService(HttpClient http, AppPaths paths, Func<DateTimeOffset>? providerUtcNow = null)
+    {
+        this.http = http;
+        this.paths = paths;
+        this.providerUtcNow = providerUtcNow ?? (() => DateTimeOffset.UtcNow);
+    }
 
     public JsonObject ReadCache() => JsonUtil.ReadObject(paths.AvailabilityCachePath);
 
@@ -140,7 +171,13 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
         }
     }
 
-    public async Task<JsonObject?> ResolveAsync(JsonObject entry, bool refresh, JsonObject cache, CancellationToken cancellationToken, bool force = false)
+    public async Task<JsonObject?> ResolveAsync(
+        JsonObject entry,
+        bool refresh,
+        JsonObject cache,
+        CancellationToken cancellationToken,
+        bool force = false,
+        bool automatic = false)
     {
         var mediaId = JsonUtil.Int(entry, "mediaId") ?? throw new ApiException("Availability entry is missing mediaId.", 400);
         if (TryGetOverrideResult(entry) is { } overrideResult)
@@ -170,9 +207,10 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
 
         var checkedAt = DateTimeOffset.UtcNow.ToString("O");
         JsonObject? malInfo = null;
+        var allowAdult = JsonUtil.Bool(entry, "isAdult") == true;
         foreach (var title in AvailabilityTitles(entry))
         {
-            var candidates = await ProviderSearchAsync(title, cancellationToken);
+            var candidates = await ProviderSearchAsync(title, allowAdult, automatic, cancellationToken);
             var match = SelectMatch(entry, candidates, title);
             if (ShouldFetchMalForMatch(entry, match))
             {
@@ -979,89 +1017,221 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
         return endedAt <= DateTimeOffset.UtcNow.AddYears(-3);
     }
 
-    private async Task<JsonArray> ProviderSearchAsync(string query, CancellationToken cancellationToken)
+    private async Task<JsonArray> ProviderSearchAsync(string query, bool allowAdult, bool automatic, CancellationToken cancellationToken)
     {
-        Exception? lastError = null;
-        for (var attempt = 0; attempt < 2; attempt += 1)
+        AvailabilityProviderException directError;
+        var directCircuitRemaining = DirectRateLimitRemaining();
+        if (directCircuitRemaining > TimeSpan.Zero && !automatic)
         {
-            await WaitForProviderCooldownAsync(cancellationToken);
-            if (DateTimeOffset.UtcNow >= hostedProviderDisabledUntil)
+            await Task.Delay(directCircuitRemaining, cancellationToken);
+            directCircuitRemaining = TimeSpan.Zero;
+        }
+
+        if (directCircuitRemaining <= TimeSpan.Zero)
+        {
+            var directAttempt = await AttemptDirectAsync();
+            if (directAttempt.Results is not null)
             {
-                try
+                return directAttempt.Results;
+            }
+            directError = directAttempt.Error!;
+        }
+        else
+        {
+            directError = new AvailabilityProviderException(
+                "direct",
+                "rate_limited",
+                $"Direct AllAnime provider rate limit circuit is open for {Math.Ceiling(directCircuitRemaining.TotalSeconds)} seconds.",
+                retryAfter: directCircuitRemaining);
+        }
+
+        try
+        {
+            return await HostedProviderFallbackAsync(query, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (AvailabilityProviderException hostedError)
+        {
+            if (!automatic && directError.Reason == "rate_limited")
+            {
+                var retryDelay = DirectRateLimitRemaining();
+                if (retryDelay > TimeSpan.Zero)
                 {
-                    var hostedResults = await HostedProviderSearchAsync(query, cancellationToken);
-                    RecordProviderSuccess();
-                    return hostedResults;
+                    await Task.Delay(retryDelay, cancellationToken);
                 }
-                catch (Exception error)
+                var retryAttempt = await AttemptDirectAsync();
+                if (retryAttempt.Results is not null)
                 {
-                    lastError = error;
-                    RecordProviderFailure();
-                    hostedProviderDisabledUntil = DateTimeOffset.UtcNow.AddMinutes(5);
+                    return retryAttempt.Results;
                 }
+                directError = retryAttempt.Error!;
             }
 
-            await WaitForProviderCooldownAsync(cancellationToken);
+            var reason = directError.Reason == "rate_limited" || hostedError.Reason == "rate_limited"
+                ? "rate_limited"
+                : "provider_unavailable";
+            throw new AvailabilityProviderException(
+                "all",
+                reason,
+                $"Availability providers failed. {directError.Message} Hosted fallback: {hostedError.Message}",
+                hostedError,
+                directError.RetryAfter);
+        }
+
+        async Task<(JsonArray? Results, AvailabilityProviderException? Error)> AttemptDirectAsync()
+        {
             try
             {
-                var directResults = await DirectAllAnimeSearchAsync(query, cancellationToken);
-                RecordProviderSuccess();
-                return directResults;
+                return (await DirectAllAnimeSearchAsync(query, allowAdult, cancellationToken), null);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (AvailabilityProviderException error)
+            {
+                if (error.Reason == "rate_limited")
+                {
+                    OpenDirectRateLimitCircuit(error.RetryAfter);
+                }
+                return (null, error);
             }
             catch (Exception error)
             {
-                lastError = error;
-                RecordProviderFailure();
-                if (attempt == 0)
-                {
-                    await Task.Delay(ProviderRetryDelay(), cancellationToken);
-                }
+                return (null, new AvailabilityProviderException(
+                    "direct",
+                    "provider_unavailable",
+                    $"Direct AllAnime provider failed: {error.Message}",
+                    error));
+            }
+        }
+    }
+
+    private TimeSpan DirectRateLimitRemaining()
+    {
+        lock (providerStateLock)
+        {
+            return directProviderRateLimitedUntil - providerUtcNow();
+        }
+    }
+
+    private void OpenDirectRateLimitCircuit(TimeSpan? retryAfter)
+    {
+        var duration = retryAfter is { } requested && requested > TimeSpan.Zero
+            ? requested
+            : TimeSpan.FromSeconds(30);
+        lock (providerStateLock)
+        {
+            var until = providerUtcNow().Add(duration);
+            if (until > directProviderRateLimitedUntil)
+            {
+                directProviderRateLimitedUntil = until;
+            }
+        }
+    }
+
+    private async Task<JsonArray> HostedProviderFallbackAsync(string query, CancellationToken cancellationToken)
+    {
+        var requiresProbe = false;
+        lock (providerStateLock)
+        {
+            if (providerUtcNow() < hostedProviderDisabledUntil)
+            {
+                throw HostedCircuitOpenException();
+            }
+            requiresProbe = !hostedProviderHealthy;
+        }
+
+        if (!requiresProbe)
+        {
+            try
+            {
+                return await HostedProviderSearchAsync(query, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                MarkHostedProviderUnavailable();
+                throw AsProviderException("hosted", error);
             }
         }
 
-        throw lastError ?? new InvalidOperationException("Availability provider failed.");
+        await hostedProbeGate.WaitAsync(cancellationToken);
+        try
+        {
+            lock (providerStateLock)
+            {
+                if (providerUtcNow() < hostedProviderDisabledUntil)
+                {
+                    throw HostedCircuitOpenException();
+                }
+                if (hostedProviderHealthy)
+                {
+                    requiresProbe = false;
+                }
+            }
+
+            if (!requiresProbe)
+            {
+                return await HostedProviderFallbackAsync(query, cancellationToken);
+            }
+
+            try
+            {
+                var results = await HostedProviderSearchAsync(query, cancellationToken);
+                lock (providerStateLock)
+                {
+                    hostedProviderHealthy = true;
+                    hostedProviderDisabledUntil = DateTimeOffset.MinValue;
+                }
+                return results;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                MarkHostedProviderUnavailable();
+                throw AsProviderException("hosted", error);
+            }
+        }
+        finally
+        {
+            hostedProbeGate.Release();
+        }
     }
 
-    private async Task WaitForProviderCooldownAsync(CancellationToken cancellationToken)
+    private void MarkHostedProviderUnavailable()
     {
-        TimeSpan delay;
-        lock (throttleLock)
+        lock (providerStateLock)
         {
-            delay = providerCooldownUntil - DateTimeOffset.UtcNow;
-        }
-
-        if (delay > TimeSpan.Zero)
-        {
-            await Task.Delay(delay, cancellationToken);
+            hostedProviderHealthy = false;
+            hostedProviderDisabledUntil = providerUtcNow().AddMinutes(5);
         }
     }
 
-    private void RecordProviderSuccess()
+    private AvailabilityProviderException HostedCircuitOpenException()
     {
-        lock (throttleLock)
-        {
-            providerFailureStreak = 0;
-            providerCooldownUntil = DateTimeOffset.MinValue;
-        }
+        var remaining = hostedProviderDisabledUntil - providerUtcNow();
+        return new AvailabilityProviderException(
+            "hosted",
+            "provider_unavailable",
+            $"Hosted proxy circuit is open for {Math.Max(1, Math.Ceiling(remaining.TotalSeconds))} seconds.");
     }
 
-    private void RecordProviderFailure()
-    {
-        lock (throttleLock)
-        {
-            providerFailureStreak = Math.Min(providerFailureStreak + 1, 6);
-            providerCooldownUntil = DateTimeOffset.UtcNow.Add(ProviderRetryDelay());
-        }
-    }
-
-    private TimeSpan ProviderRetryDelay()
-    {
-        lock (throttleLock)
-        {
-            var seconds = Math.Min(20, Math.Pow(2, Math.Max(0, providerFailureStreak - 1)));
-            return TimeSpan.FromSeconds(seconds);
-        }
-    }
+    private static AvailabilityProviderException AsProviderException(string provider, Exception error) =>
+        error as AvailabilityProviderException ?? new AvailabilityProviderException(
+            provider,
+            "provider_unavailable",
+            $"{provider} availability provider failed: {error.Message}",
+            error);
 
     private async Task<JsonArray> HostedProviderSearchAsync(string query, CancellationToken cancellationToken)
     {
@@ -1070,17 +1240,38 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
         request.Headers.Accept.ParseAdd("application/json");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(4));
-        using var response = await http.SendAsync(request, timeout.Token);
-        var text = await response.Content.ReadAsStringAsync(timeout.Token);
-        var payload = JsonNode.Parse(string.IsNullOrWhiteSpace(text) ? "[]" : text) as JsonArray;
-        if (!response.IsSuccessStatusCode || payload is null)
+        HttpResponseMessage response;
+        try
         {
-            throw new InvalidOperationException($"Hosted availability provider returned {(int)response.StatusCode}");
+            response = await http.SendAsync(request, timeout.Token);
         }
-        return payload;
+        catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new AvailabilityProviderException("hosted", "timeout", "Hosted availability proxy timed out.", error);
+        }
+        using (response)
+        {
+            try
+            {
+                var text = await response.Content.ReadAsStringAsync(timeout.Token);
+                var payload = JsonNode.Parse(string.IsNullOrWhiteSpace(text) ? "[]" : text) as JsonArray;
+                if (!response.IsSuccessStatusCode || payload is null)
+                {
+                    throw new AvailabilityProviderException(
+                        "hosted",
+                        response.StatusCode == System.Net.HttpStatusCode.TooManyRequests ? "rate_limited" : "provider_unavailable",
+                        $"Hosted availability provider returned {(int)response.StatusCode}");
+                }
+                return payload;
+            }
+            catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new AvailabilityProviderException("hosted", "timeout", "Hosted availability proxy timed out.", error);
+            }
+        }
     }
 
-    private async Task<JsonArray> DirectAllAnimeSearchAsync(string query, CancellationToken cancellationToken)
+    private async Task<JsonArray> DirectAllAnimeSearchAsync(string query, bool allowAdult, CancellationToken cancellationToken)
     {
         const string graphQl = "query($search: SearchInput $limit: Int $page: Int $translationType: VaildTranslationTypeEnumType $countryOrigin: VaildCountryOriginEnumType) { shows( search: $search limit: $limit page: $page translationType: $translationType countryOrigin: $countryOrigin ) { edges { _id name availableEpisodes __typename } }}";
         var body = new JsonObject
@@ -1089,7 +1280,7 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
             {
                 ["search"] = new JsonObject
                 {
-                    ["allowAdult"] = false,
+                    ["allowAdult"] = allowAdult,
                     ["allowUnknown"] = false,
                     ["query"] = query
                 },
@@ -1108,28 +1299,83 @@ internal sealed class AvailabilityService(HttpClient http, AppPaths paths)
         request.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(12));
-        using var response = await http.SendAsync(request, timeout.Token);
-        var text = await response.Content.ReadAsStringAsync(timeout.Token);
-        var payload = JsonNode.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
-        var edges = payload?["data"]?["shows"]?["edges"] as JsonArray;
-        if (!response.IsSuccessStatusCode || edges is null)
+        HttpResponseMessage response;
+        try
         {
-            throw new InvalidOperationException($"AllAnime availability provider returned {(int)response.StatusCode}");
+            response = await http.SendAsync(request, timeout.Token);
+        }
+        catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new AvailabilityProviderException("direct", "timeout", "Direct AllAnime provider timed out.", error);
+        }
+        using (response)
+        {
+            try
+            {
+                var text = await response.Content.ReadAsStringAsync(timeout.Token);
+                var payload = JsonNode.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
+                var edges = payload?["data"]?["shows"]?["edges"] as JsonArray;
+                if (!response.IsSuccessStatusCode || edges is null)
+                {
+                    var graphQlError = (payload?["errors"] as JsonArray)?
+                        .OfType<JsonObject>()
+                        .Select(error => JsonUtil.String(error, "message"))
+                        .FirstOrDefault(message => !string.IsNullOrWhiteSpace(message));
+                    var retryAfter = response.Headers.RetryAfter?.Delta;
+                    if (retryAfter is null && response.Headers.RetryAfter?.Date is { } retryAt)
+                    {
+                        retryAfter = retryAt - providerUtcNow();
+                    }
+                    if (retryAfter is null)
+                    {
+                        retryAfter = RetryAfterFromMessage(graphQlError);
+                    }
+                    var rateLimited = response.StatusCode == System.Net.HttpStatusCode.TooManyRequests ||
+                        IsProviderRateLimitMessage(graphQlError);
+                    throw new AvailabilityProviderException(
+                        "direct",
+                        rateLimited ? "rate_limited" : "provider_unavailable",
+                        $"Direct AllAnime provider returned {(int)response.StatusCode}{(graphQlError is null ? "." : $": {graphQlError}")}",
+                        retryAfter: retryAfter);
+                }
+
+                var results = new JsonArray();
+                foreach (var candidate in edges.OfType<JsonObject>())
+                {
+                    var available = candidate["availableEpisodes"] as JsonObject ?? new JsonObject();
+                    results.Add((JsonNode?)new JsonObject
+                    {
+                        ["id"] = JsonUtil.String(candidate, "_id"),
+                        ["title"] = JsonUtil.String(candidate, "name"),
+                        ["episodes_sub"] = JsonUtil.Int(available, "sub") ?? 0,
+                        ["episodes_dub"] = JsonUtil.Int(available, "dub") ?? 0
+                    });
+                }
+                return results;
+            }
+            catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new AvailabilityProviderException("direct", "timeout", "Direct AllAnime provider timed out.", error);
+            }
+        }
+    }
+
+    private static bool IsProviderRateLimitMessage(string? message) =>
+        !string.IsNullOrWhiteSpace(message) &&
+        (message.Contains("too many requests", StringComparison.OrdinalIgnoreCase) ||
+         message.Contains("rate limit", StringComparison.OrdinalIgnoreCase));
+
+    private static TimeSpan? RetryAfterFromMessage(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return null;
         }
 
-        var results = new JsonArray();
-        foreach (var candidate in edges.OfType<JsonObject>())
-        {
-            var available = candidate["availableEpisodes"] as JsonObject ?? new JsonObject();
-            results.Add((JsonNode?)new JsonObject
-            {
-                ["id"] = JsonUtil.String(candidate, "_id"),
-                ["title"] = JsonUtil.String(candidate, "name"),
-                ["episodes_sub"] = JsonUtil.Int(available, "sub") ?? 0,
-                ["episodes_dub"] = JsonUtil.Int(available, "dub") ?? 0
-            });
-        }
-        return results;
+        var match = Regex.Match(message, @"(?:in|after)\s+(?<seconds>\d+(?:\.\d+)?)\s*seconds?", RegexOptions.IgnoreCase);
+        return match.Success && double.TryParse(match.Groups["seconds"].Value, System.Globalization.CultureInfo.InvariantCulture, out var seconds) && seconds > 0
+            ? TimeSpan.FromSeconds(seconds)
+            : null;
     }
 
     private static MatchSelection? SelectMatch(JsonObject entry, JsonArray candidates, string queryTitle, int? expectedTotalOverride = null)

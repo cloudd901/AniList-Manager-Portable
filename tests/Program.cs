@@ -21,6 +21,15 @@ try
     TestMixedPreflightFixture(service);
     await TestManualForceIncludesUnreleased(paths);
     await TestCancellationRemainsBounded(service);
+    await TestDirectProviderIsPrimary(paths);
+    await TestAdultDirectSearchIsEnabled(paths);
+    await TestDirectFailureFallsBackToHosted(paths);
+    await TestConcurrentFailuresUseOneHostedProbe(paths);
+    await TestHostedCircuitCooldown(paths);
+    await TestCancellationDoesNotPoisonProviderState(paths);
+    await TestDirectRateLimitCircuit(paths);
+    await TestManualRateLimitWaitsAndRetries(paths);
+    TestAutomaticBatchOutcomes();
 }
 catch (Exception error)
 {
@@ -197,7 +206,10 @@ async Task TestCancellationRemainsBounded(AvailabilityService service)
 
 async Task TestManualForceIncludesUnreleased(AppPaths paths)
 {
-    using var http = new HttpClient(new SuccessfulAvailabilityHandler());
+    using var http = new HttpClient(new ScriptedAvailabilityHandler
+    {
+        DirectResponder = (title, _, _) => Task.FromResult(ScriptedAvailabilityHandler.DirectSuccess(title, 3, 0))
+    });
     var service = new AvailabilityService(http, paths);
     var result = await service.ResolveAsync(
         Entry(6001, "PLANNING", "NOT_YET_RELEASED", 12, null),
@@ -210,6 +222,230 @@ async Task TestManualForceIncludesUnreleased(AppPaths paths)
     Expect(JsonUtil.Int(result, "subEpisodes") == 3, "forced unreleased lookup should return provider data");
 }
 
+async Task TestDirectProviderIsPrimary(AppPaths paths)
+{
+    var handler = new ScriptedAvailabilityHandler
+    {
+        DirectResponder = (title, _, _) => Task.FromResult(ScriptedAvailabilityHandler.DirectSuccess(title, 12, 4)),
+        HostedResponder = (title, _, _) => Task.FromResult(ScriptedAvailabilityHandler.HostedSuccess(title, 12, 4))
+    };
+    using var http = new HttpClient(handler);
+    var service = new AvailabilityService(http, paths);
+    var result = await service.ResolveAsync(Entry(8001, "CURRENT", "RELEASING", 12, EndDate(2026, 12, 1)), true, new JsonObject(), CancellationToken.None, true);
+
+    Expect(JsonUtil.Int(result, "subEpisodes") == 12, "direct provider success should return availability");
+    Expect(handler.DirectCalls == 1, "direct provider should be called first");
+    Expect(handler.HostedCalls == 0, "direct success should never call the hosted proxy");
+    Expect(handler.LastDirectAllowAdult == false, "direct provider should not broaden ordinary title searches to adult results");
+}
+
+async Task TestAdultDirectSearchIsEnabled(AppPaths paths)
+{
+    var handler = new ScriptedAvailabilityHandler
+    {
+        DirectResponder = (title, _, _) => Task.FromResult(ScriptedAvailabilityHandler.DirectSuccess(title, 1, 0))
+    };
+    using var http = new HttpClient(handler);
+    var service = new AvailabilityService(http, paths);
+    var entry = Entry(8003, "CURRENT", "RELEASING", 1, EndDate(2026, 12, 1));
+    entry["isAdult"] = true;
+    var result = await service.ResolveAsync(entry, true, new JsonObject(), CancellationToken.None, true);
+
+    Expect(JsonUtil.Int(result, "subEpisodes") == 1, "adult direct provider search should return availability");
+    Expect(handler.LastDirectAllowAdult == true, "adult list entries should enable adult direct-provider results");
+}
+
+async Task TestDirectFailureFallsBackToHosted(AppPaths paths)
+{
+    var handler = new ScriptedAvailabilityHandler
+    {
+        DirectResponder = (_, _, _) => Task.FromResult(ScriptedAvailabilityHandler.Failure(HttpStatusCode.ServiceUnavailable)),
+        HostedResponder = (title, _, _) => Task.FromResult(ScriptedAvailabilityHandler.HostedSuccess(title, 9, 2))
+    };
+    using var http = new HttpClient(handler);
+    var service = new AvailabilityService(http, paths);
+    var result = await service.ResolveAsync(Entry(8002, "CURRENT", "RELEASING", 12, EndDate(2026, 12, 1)), true, new JsonObject(), CancellationToken.None, true);
+
+    Expect(JsonUtil.Int(result, "subEpisodes") == 9, "hosted fallback should return availability after direct failure");
+    Expect(handler.DirectCalls == 1 && handler.HostedCalls == 1, "direct failure should make exactly one hosted fallback request");
+}
+
+async Task TestConcurrentFailuresUseOneHostedProbe(AppPaths paths)
+{
+    var handler = new ScriptedAvailabilityHandler
+    {
+        DirectResponder = (_, _, _) => Task.FromResult(ScriptedAvailabilityHandler.Failure(HttpStatusCode.ServiceUnavailable)),
+        HostedResponder = (_, _, _) => Task.FromException<HttpResponseMessage>(new HttpRequestException("proxy DNS failure"))
+    };
+    using var http = new HttpClient(handler);
+    var service = new AvailabilityService(http, paths);
+    var timer = Stopwatch.StartNew();
+    var tasks = Enumerable.Range(0, 6).Select(async index =>
+    {
+        try
+        {
+            await service.ResolveAsync(Entry(8100 + index, "CURRENT", "RELEASING", 12, EndDate(2026, 12, 1)), true, new JsonObject(), CancellationToken.None, true);
+            return false;
+        }
+        catch (AvailabilityProviderException)
+        {
+            return true;
+        }
+    });
+    var failed = await Task.WhenAll(tasks);
+
+    Expect(failed.All(value => value), "all six scripted provider failures should be reported");
+    Expect(handler.DirectCalls == 6, "all concurrent lookups should try the direct provider");
+    Expect(handler.HostedCalls == 1, "six concurrent failures should perform only one hosted health probe");
+    Expect(timer.Elapsed < TimeSpan.FromSeconds(3), "concurrent provider failures should not incur shared exponential delay");
+}
+
+async Task TestHostedCircuitCooldown(AppPaths paths)
+{
+    var clock = DateTimeOffset.Parse("2026-08-21T12:00:00Z");
+    var hostedAvailable = false;
+    var handler = new ScriptedAvailabilityHandler
+    {
+        DirectResponder = (_, _, _) => Task.FromResult(ScriptedAvailabilityHandler.Failure(HttpStatusCode.ServiceUnavailable)),
+        HostedResponder = (title, _, _) => hostedAvailable
+            ? Task.FromResult(ScriptedAvailabilityHandler.HostedSuccess(title, 7, 1))
+            : Task.FromException<HttpResponseMessage>(new HttpRequestException("proxy unavailable"))
+    };
+    using var http = new HttpClient(handler);
+    var service = new AvailabilityService(http, paths, () => clock);
+
+    await ExpectProviderFailure(service, Entry(8201, "CURRENT", "RELEASING", 12, EndDate(2026, 12, 1)));
+    await ExpectProviderFailure(service, Entry(8202, "CURRENT", "RELEASING", 12, EndDate(2026, 12, 1)));
+    Expect(handler.HostedCalls == 1, "open hosted circuit should skip further proxy requests");
+
+    clock = clock.AddMinutes(5).AddSeconds(1);
+    hostedAvailable = true;
+    var result = await service.ResolveAsync(Entry(8203, "CURRENT", "RELEASING", 12, EndDate(2026, 12, 1)), true, new JsonObject(), CancellationToken.None, true);
+    Expect(JsonUtil.Int(result, "subEpisodes") == 7, "hosted proxy should be probed again after its cooldown expires");
+    Expect(handler.HostedCalls == 2, "expired hosted circuit should allow exactly one new probe");
+}
+
+async Task TestCancellationDoesNotPoisonProviderState(AppPaths paths)
+{
+    var delayDirect = true;
+    var handler = new ScriptedAvailabilityHandler
+    {
+        DirectResponder = async (title, _, token) =>
+        {
+            if (delayDirect)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(10), token);
+            }
+            return ScriptedAvailabilityHandler.DirectSuccess(title, 8, 3);
+        }
+    };
+    using var http = new HttpClient(handler);
+    var service = new AvailabilityService(http, paths);
+    using (var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100)))
+    {
+        try
+        {
+            await service.ResolveAsync(Entry(8301, "CURRENT", "RELEASING", 12, EndDate(2026, 12, 1)), true, new JsonObject(), cancellation.Token, true);
+            failures.Add("cancelled direct request should not complete successfully");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    delayDirect = false;
+    var result = await service.ResolveAsync(Entry(8302, "CURRENT", "RELEASING", 12, EndDate(2026, 12, 1)), true, new JsonObject(), CancellationToken.None, true);
+    Expect(JsonUtil.Int(result, "subEpisodes") == 8, "provider should remain usable after caller cancellation");
+    Expect(handler.DirectCalls == 2 && handler.HostedCalls == 0, "cancellation should not open or reroute provider circuits");
+}
+
+async Task TestDirectRateLimitCircuit(AppPaths paths)
+{
+    var clock = DateTimeOffset.Parse("2026-08-21T12:00:00Z");
+    var directAvailable = false;
+    var handler = new ScriptedAvailabilityHandler
+    {
+        DirectResponder = (title, _, _) => Task.FromResult(directAvailable
+            ? ScriptedAvailabilityHandler.DirectSuccess(title, 6, 2)
+            : ScriptedAvailabilityHandler.GraphQlRateLimited(45)),
+        HostedResponder = (_, _, _) => Task.FromException<HttpResponseMessage>(new HttpRequestException("proxy unavailable"))
+    };
+    using var http = new HttpClient(handler);
+    var service = new AvailabilityService(http, paths, () => clock);
+
+    await ExpectProviderFailure(service, Entry(8401, "CURRENT", "RELEASING", 12, EndDate(2026, 12, 1)), automatic: true);
+    await ExpectProviderFailure(service, Entry(8402, "CURRENT", "RELEASING", 12, EndDate(2026, 12, 1)), automatic: true);
+    Expect(handler.DirectCalls == 1, "GraphQL rate-limit errors should open the direct circuit and skip the next automatic request");
+
+    clock = clock.AddSeconds(46);
+    directAvailable = true;
+    var result = await service.ResolveAsync(Entry(8403, "CURRENT", "RELEASING", 12, EndDate(2026, 12, 1)), true, new JsonObject(), CancellationToken.None, true);
+    Expect(JsonUtil.Int(result, "subEpisodes") == 6, "direct provider should resume after Retry-After expires");
+    Expect(handler.DirectCalls == 2, "expired direct rate-limit circuit should allow another request");
+}
+
+async Task TestManualRateLimitWaitsAndRetries(AppPaths paths)
+{
+    var handler = new ScriptedAvailabilityHandler
+    {
+        DirectResponder = (title, call, _) => Task.FromResult(call == 1
+            ? ScriptedAvailabilityHandler.GraphQlRateLimited(0.05)
+            : ScriptedAvailabilityHandler.DirectSuccess(title, 5, 2)),
+        HostedResponder = (_, _, _) => Task.FromException<HttpResponseMessage>(new HttpRequestException("proxy unavailable"))
+    };
+    using var http = new HttpClient(handler);
+    var service = new AvailabilityService(http, paths);
+    var timer = Stopwatch.StartNew();
+    var result = await service.ResolveAsync(
+        Entry(8450, "CURRENT", "RELEASING", 12, EndDate(2026, 12, 1)),
+        true,
+        new JsonObject(),
+        CancellationToken.None,
+        force: true,
+        automatic: false);
+
+    Expect(JsonUtil.Int(result, "subEpisodes") == 5, "manual lookup should retry the direct provider after a rate-limit cooldown");
+    Expect(handler.DirectCalls == 2 && handler.HostedCalls == 1, "manual rate limit should try the fallback once, then retry direct once");
+    Expect(timer.Elapsed < TimeSpan.FromSeconds(2), "scripted manual rate-limit retry should complete after its short Retry-After delay");
+}
+
+void TestAutomaticBatchOutcomes()
+{
+    var complete = ApiServer.ClassifyAutomaticBatchOutcome(true, 0, 6, false, false);
+    Expect(!complete.StopAutomaticQueue && complete.DeferredReason is null, "fully successful automatic wave should continue without a deferred reason");
+
+    var isolated = ApiServer.ClassifyAutomaticBatchOutcome(true, 1, 5, false, false);
+    Expect(!isolated.StopAutomaticQueue && isolated.DeferredReason == "partial_failure", "isolated lookup failure should continue the automatic queue");
+
+    var outage = ApiServer.ClassifyAutomaticBatchOutcome(true, 6, 0, false, false);
+    Expect(outage.StopAutomaticQueue && outage.DeferredReason == "provider_unavailable", "zero-success wave should stop as a provider-wide outage");
+
+    var limited = ApiServer.ClassifyAutomaticBatchOutcome(true, 2, 4, true, false);
+    Expect(limited.StopAutomaticQueue && limited.DeferredReason == "rate_limited", "rate limiting should stop the automatic queue");
+
+    var timeout = ApiServer.ClassifyAutomaticBatchOutcome(true, 3, 3, false, true);
+    Expect(timeout.StopAutomaticQueue && timeout.DeferredReason == "timeout", "batch deadline should stop the automatic queue");
+
+    var manual = ApiServer.ClassifyAutomaticBatchOutcome(false, 2, 4, false, false);
+    Expect(!manual.StopAutomaticQueue && manual.DeferredReason is null, "manual batches should not use automatic stop policy");
+
+    var stale = Cached(8501, 12, 8, 4, "high", DateTimeOffset.UtcNow.AddDays(-2), false);
+    Expect(ReferenceEquals(ApiServer.AvailabilityFailureFallback(stale), stale), "provider lookup failure should retain a stale cached value");
+    Expect(ApiServer.AvailabilityFailureFallback(null) is null, "provider lookup failure without cache should remain missing rather than create an error badge");
+}
+
+async Task ExpectProviderFailure(AvailabilityService service, JsonObject entry, bool automatic = false)
+{
+    try
+    {
+        await service.ResolveAsync(entry, true, new JsonObject(), CancellationToken.None, force: true, automatic: automatic);
+        failures.Add($"scripted provider request for {JsonUtil.Int(entry, "mediaId")} should fail");
+    }
+    catch (AvailabilityProviderException)
+    {
+    }
+}
+
 JsonObject Entry(int mediaId, string listStatus, string mediaStatus, int total, JsonObject? endDate) => new()
 {
     ["mediaId"] = mediaId,
@@ -217,6 +453,7 @@ JsonObject Entry(int mediaId, string listStatus, string mediaStatus, int total, 
     ["status"] = listStatus,
     ["mediaStatus"] = mediaStatus,
     ["format"] = "TV",
+    ["isAdult"] = false,
     ["title"] = $"Test {mediaId}",
     ["romajiTitle"] = $"Test {mediaId}",
     ["englishTitle"] = $"Test {mediaId}",
@@ -262,14 +499,77 @@ sealed class DelayedHandler : HttpMessageHandler
     }
 }
 
-sealed class SuccessfulAvailabilityHandler : HttpMessageHandler
+sealed class ScriptedAvailabilityHandler : HttpMessageHandler
 {
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    public Func<string, int, CancellationToken, Task<HttpResponseMessage>> DirectResponder { get; init; } =
+        (_, _, _) => Task.FromResult(Failure(HttpStatusCode.ServiceUnavailable));
+    public Func<string, int, CancellationToken, Task<HttpResponseMessage>> HostedResponder { get; init; } =
+        (_, _, _) => Task.FromResult(Failure(HttpStatusCode.ServiceUnavailable));
+    public int DirectCalls;
+    public int HostedCalls;
+    public bool? LastDirectAllowAdult;
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        if (request.RequestUri?.Host.Equals("api.allanime.day", StringComparison.OrdinalIgnoreCase) == true)
         {
-            Content = new StringContent("[{\"id\":\"test-6001\",\"title\":\"Test 6001\",\"episodes_sub\":3,\"episodes_dub\":0}]")
-        };
-        return Task.FromResult(response);
+            var call = Interlocked.Increment(ref DirectCalls);
+            var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            var search = JsonNode.Parse(body)?["variables"]?["search"] as JsonObject;
+            var title = JsonUtil.String(search, "query") ?? "Test";
+            LastDirectAllowAdult = JsonUtil.Bool(search, "allowAdult");
+            return await DirectResponder(title, call, cancellationToken);
+        }
+
+        var hostedCall = Interlocked.Increment(ref HostedCalls);
+        var rawQuery = request.RequestUri?.Query.TrimStart('?') ?? "";
+        var titleQuery = rawQuery.StartsWith("query=", StringComparison.OrdinalIgnoreCase) ? rawQuery[6..] : rawQuery;
+        return await HostedResponder(Uri.UnescapeDataString(titleQuery), hostedCall, cancellationToken);
     }
+
+    public static HttpResponseMessage DirectSuccess(string title, int sub, int dub) => Json(HttpStatusCode.OK, new JsonObject
+    {
+        ["data"] = new JsonObject
+        {
+            ["shows"] = new JsonObject
+            {
+                ["edges"] = new JsonArray((JsonNode?)new JsonObject
+                {
+                    ["_id"] = $"direct-{title}",
+                    ["name"] = title,
+                    ["availableEpisodes"] = new JsonObject { ["sub"] = sub, ["dub"] = dub }
+                })
+            }
+        }
+    }.ToJsonString());
+
+    public static HttpResponseMessage HostedSuccess(string title, int sub, int dub) => Json(HttpStatusCode.OK, new JsonArray((JsonNode?)new JsonObject
+    {
+        ["id"] = $"hosted-{title}",
+        ["title"] = title,
+        ["episodes_sub"] = sub,
+        ["episodes_dub"] = dub
+    }).ToJsonString());
+
+    public static HttpResponseMessage Failure(HttpStatusCode statusCode) => Json(statusCode, "{}");
+
+    public static HttpResponseMessage RateLimited(TimeSpan retryAfter)
+    {
+        var response = Failure(HttpStatusCode.TooManyRequests);
+        response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(retryAfter);
+        return response;
+    }
+
+    public static HttpResponseMessage GraphQlRateLimited(double retryAfterSeconds) => Json(HttpStatusCode.OK, new JsonObject
+    {
+        ["errors"] = new JsonArray((JsonNode?)new JsonObject
+        {
+            ["message"] = $"Too many requests, please try again in {retryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} seconds."
+        })
+    }.ToJsonString());
+
+    private static HttpResponseMessage Json(HttpStatusCode statusCode, string body) => new(statusCode)
+    {
+        Content = new StringContent(body)
+    };
 }
