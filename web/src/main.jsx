@@ -85,6 +85,7 @@ const AUTO_AVAILABILITY_COOLDOWN_MS = 60 * 60 * 1000;
 const AUTO_AVAILABILITY_DEFERRED_COOLDOWN_MS = 15 * 60 * 1000;
 const AUTO_AVAILABILITY_STORAGE_PREFIX = "anilist-manager:auto-availability:";
 const AUTO_AVAILABILITY_DEFERRED_STORAGE_PREFIX = "anilist-manager:auto-availability-deferred:";
+const AVAILABILITY_DEFERRED_MEDIA_IDS_STORAGE_KEY = "anilist-manager:availability-deferred-media-ids";
 const BULK_PROGRESS_CHUNK_SIZE = 12;
 const COLOR_MODES = [
   { value: "light", label: "Light" },
@@ -1308,6 +1309,7 @@ function availabilityRequestEntries(entries) {
     englishTitle: entry.englishTitle,
     nativeTitle: entry.nativeTitle,
     synonyms: entry.synonyms || [],
+    isAdult: entry.isAdult === true,
     endDate: entry.endDate,
     format: entry.format,
     mediaStatus: entry.mediaStatus,
@@ -1363,6 +1365,28 @@ function markAutoAvailability(status, deferred = false) {
     window.localStorage.removeItem(staleKey);
   } catch {
     // Continue when browser storage is unavailable.
+  }
+}
+
+function readDeferredAvailabilityMediaIds() {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(AVAILABILITY_DEFERRED_MEDIA_IDS_STORAGE_KEY) || "[]");
+    return new Set((Array.isArray(saved) ? saved : [])
+      .map((mediaId) => Number(mediaId))
+      .filter((mediaId) => Number.isInteger(mediaId) && mediaId > 0));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeDeferredAvailabilityMediaIds(mediaIds) {
+  try {
+    const saved = Array.from(mediaIds)
+      .filter((mediaId) => Number.isInteger(mediaId) && mediaId > 0)
+      .sort((left, right) => left - right);
+    window.localStorage.setItem(AVAILABILITY_DEFERRED_MEDIA_IDS_STORAGE_KEY, JSON.stringify(saved));
+  } catch {
+    // Continue with in-memory deferred tracking when browser storage is unavailable.
   }
 }
 
@@ -2333,7 +2357,7 @@ function RefreshAvailabilityDialog({ open, onClose, onRefresh }) {
           <p>Choose which entries to check against the availability provider.</p>
           <div className="choice-actions">
             <button type="button" onClick={() => onRefresh("missing")}>
-              Missing
+              Missing/Deferred
             </button>
             <button type="button" onClick={() => onRefresh("airing")}>
               Airing
@@ -5057,6 +5081,7 @@ function App() {
   const [availabilityLoading, setAvailabilityLoading] = useState(false);
   const [availabilityProgress, setAvailabilityProgress] = useState({ checked: 0, total: 0, phase: "idle" });
   const [availabilityWarning, setAvailabilityWarning] = useState("");
+  const [deferredAvailabilityMediaIds, setDeferredAvailabilityMediaIds] = useState(() => readDeferredAvailabilityMediaIds());
   const [loadDiagnostics, setLoadDiagnostics] = useState("");
   const [loadProgress, setLoadProgress] = useState("");
   const [showNotes, setShowNotes] = useState(() => defaultSettings().showNotes);
@@ -5076,6 +5101,7 @@ function App() {
   const addSearchRunId = useRef(0);
   const availabilityRunId = useRef(0);
   const availabilityAbortController = useRef(null);
+  const deferredAvailabilityMediaIdsRef = useRef(deferredAvailabilityMediaIds);
   const ratingRunId = useRef(0);
   const ratingAbortController = useRef(null);
   const completedProgressAbortController = useRef(null);
@@ -5100,6 +5126,39 @@ function App() {
     showStatusLists: activeStatus === ALL_STATUS || Boolean(activeCustomList),
     showCustomLists: activeStatus === ALL_STATUS || isListStatus(activeStatus)
   });
+
+  useEffect(() => {
+    const stableMediaIds = Object.entries(availability)
+      .filter(([, item]) => isPermanentAvailability(item) || isLocalAvailabilityOverride(item))
+      .map(([mediaId, item]) => Number(item?.mediaId ?? mediaId))
+      .filter((mediaId) => Number.isInteger(mediaId) && mediaId > 0);
+    if (stableMediaIds.length > 0) {
+      updateDeferredAvailabilityMediaIds([], stableMediaIds);
+    }
+  }, [availability]);
+
+  function updateDeferredAvailabilityMediaIds(addMediaIds = [], removeMediaIds = []) {
+    const next = new Set(deferredAvailabilityMediaIdsRef.current);
+    for (const mediaIdValue of removeMediaIds) {
+      const mediaId = Number(mediaIdValue);
+      if (Number.isInteger(mediaId) && mediaId > 0) {
+        next.delete(mediaId);
+      }
+    }
+    for (const mediaIdValue of addMediaIds) {
+      const mediaId = Number(mediaIdValue);
+      if (Number.isInteger(mediaId) && mediaId > 0) {
+        next.add(mediaId);
+      }
+    }
+    const current = deferredAvailabilityMediaIdsRef.current;
+    if (next.size === current.size && Array.from(next).every((mediaId) => current.has(mediaId))) {
+      return;
+    }
+    deferredAvailabilityMediaIdsRef.current = next;
+    setDeferredAvailabilityMediaIds(next);
+    writeDeferredAvailabilityMediaIds(next);
+  }
   const defaultVisibleTab = normalizeListSettings(settings.lists, listTabs.customLists).defaultTab;
   const renderedTabs = useMemo(() => visibleMainTabs(settings, listTabs), [settings.lists, listTabs]);
   const effectiveQuickListsMode = quickListsModeForTab(settings, activeStatus, listTabs.customLists, simplifiedQuickListsModeByTab);
@@ -5769,6 +5828,8 @@ function App() {
       phase: showProgress && (preloadReusableCache || automatic) ? "preparing" : "checking"
     });
     setAvailabilityWarning("");
+    let deferredTrackingEntries = cacheOnly ? [] : entriesToCheck;
+    let nextDeferredTrackingIndex = 0;
     try {
       let entriesForRefresh = entriesToCheck;
       if (automatic && entriesToCheck.length > 0) {
@@ -5850,7 +5911,14 @@ function App() {
       if (!cacheOnly) {
         logAvailabilityRecheckQueue(entriesForRefresh, automatic);
       }
+      deferredTrackingEntries = cacheOnly ? [] : entriesForRefresh;
       let index = 0;
+      let automaticProcessed = 0;
+      let automaticSuccessful = 0;
+      const automaticDeferredMediaIds = new Set();
+      let manualSuccessful = 0;
+      let manualFailed = 0;
+      let manualRateLimited = false;
       const requestChunkSize = cacheOnly ? AVAILABILITY_CHUNK_SIZE : AVAILABILITY_REMOTE_CHUNK_SIZE;
       while (index < entriesForRefresh.length) {
         const chunk = entriesForRefresh.slice(index, index + requestChunkSize);
@@ -5877,14 +5945,78 @@ function App() {
         if (availabilityRunId.current !== runId) {
           return false;
         }
+        nextDeferredTrackingIndex = index + chunk.length;
+        const payloadEntries = payload.entries || [];
+        const responseWarnings = payload.warnings || [];
+        if (!cacheOnly) {
+          const failedMediaIds = (automatic
+            ? (payload.deferredMediaIds || [])
+            : responseWarnings.map((warning) => warning.mediaId))
+            .map((mediaId) => Number(mediaId))
+            .filter((mediaId) => Number.isInteger(mediaId) && mediaId > 0);
+          const failedMediaIdSet = new Set(failedMediaIds);
+          const successfulMediaIds = chunk
+            .map((entry) => entry.mediaId)
+            .filter((mediaId) => !failedMediaIdSet.has(Number(mediaId)));
+          updateDeferredAvailabilityMediaIds(failedMediaIds, successfulMediaIds);
+        }
         setAvailability((currentAvailability) => ({
           ...currentAvailability,
-          ...Object.fromEntries(payload.entries.map((entry) => [entry.mediaId, entry]))
+          ...Object.fromEntries(payloadEntries.map((entry) => [entry.mediaId, entry]))
         }));
+        if (automatic) {
+          const chunkDeferredMediaIds = payload.deferredMediaIds || [];
+          for (const mediaId of chunkDeferredMediaIds) {
+            automaticDeferredMediaIds.add(mediaId);
+          }
+          automaticProcessed += chunk.length;
+          automaticSuccessful += Number.isFinite(Number(payload.successful))
+            ? Number(payload.successful)
+            : Math.max(0, chunk.length - chunkDeferredMediaIds.length);
+          if (responseWarnings.length > 0) {
+            const warningRows = responseWarnings.map((warning) => ({
+              mediaId: warning.mediaId,
+              title: warning.title,
+              reason: warning.reason || payload.deferredReason || "provider_unavailable",
+              provider: warning.provider || "unknown",
+              error: warning.error
+            }));
+            console.warn(
+              `[Availability] Automatic re-check entry warning${responseWarnings.length === 1 ? "" : "s"}.`,
+              warningRows
+            );
+            for (const warning of warningRows) {
+              console.warn(
+                `[Availability] ${warning.mediaId}: ${warning.title} failed (${warning.reason}; provider=${warning.provider}): ${warning.error}`
+              );
+            }
+          }
+        } else if (!cacheOnly) {
+          manualSuccessful += Number(payload.successful || 0);
+          manualFailed += Number(payload.failed ?? payload.warningCount ?? responseWarnings.length);
+          manualRateLimited = manualRateLimited || payload.rateLimited === true;
+          if (responseWarnings.length > 0) {
+            const warningRows = responseWarnings.map((warning) => ({
+              mediaId: warning.mediaId,
+              title: warning.title,
+              reason: warning.reason || "provider_unavailable",
+              provider: warning.provider || "unknown",
+              error: warning.error
+            }));
+            console.warn(
+              `[Availability] Manual re-check entry warning${responseWarnings.length === 1 ? "" : "s"}.`,
+              warningRows
+            );
+            for (const warning of warningRows) {
+              console.warn(
+                `[Availability] ${warning.mediaId}: ${warning.title} failed (${warning.reason}; provider=${warning.provider}): ${warning.error}`
+              );
+            }
+          }
+        }
         if (showProgress) {
-          const deferredInChunk = (payload.deferredMediaIds || []).length;
           const completedEntries = automatic
-            ? Math.max(0, chunk.length - deferredInChunk)
+            ? chunk.length
             : Number(payload.checked || 0) + Number(payload.cached || 0);
           setAvailabilityLoading(true);
           setAvailabilityProgress({
@@ -5897,39 +6029,77 @@ function App() {
           });
         }
         if (automatic && payload.deferred) {
-          const completed = Math.min(index + Math.max(0, chunk.length - (payload.deferredMediaIds || []).length), entriesForRefresh.length);
-          const deferredCount = entriesForRefresh.length - completed;
-          const reason = payload.deferredReason === "rate_limited" ? "rate limited" : "temporarily unavailable";
-          const deferredIds = new Set(payload.deferredMediaIds || []);
-          const deferredEntries = [
-            ...chunk.filter((entry) => deferredIds.has(entry.mediaId)),
-            ...entriesForRefresh.slice(index + chunk.length)
-          ];
-          console.warn(
-            `[Availability] Automatic re-check deferred ${deferredCount} item${deferredCount === 1 ? "" : "s"} (${payload.deferredReason || "provider_unavailable"}).`,
-            availabilityConsoleRows(deferredEntries)
-          );
-          setAvailabilityWarning(`Availability provider is ${reason}. Checked ${completed}/${entriesForRefresh.length}; deferred ${deferredCount}. Cached values were kept.`);
-          if (options.autoStatus) {
-            markAutoAvailability(options.autoStatus, true);
+          const stopAutomaticQueue = payload.stopAutomaticQueue ?? true;
+          if (stopAutomaticQueue) {
+            const unstartedEntries = entriesForRefresh.slice(index + chunk.length);
+            for (const entry of unstartedEntries) {
+              automaticDeferredMediaIds.add(entry.mediaId);
+            }
+            updateDeferredAvailabilityMediaIds(unstartedEntries.map((entry) => entry.mediaId));
+            const deferredCount = automaticDeferredMediaIds.size;
+            const deferredIds = new Set(payload.deferredMediaIds || []);
+            const deferredEntries = [
+              ...chunk.filter((entry) => deferredIds.has(entry.mediaId)),
+              ...unstartedEntries
+            ];
+            const deferredReason = payload.deferredReason || "provider_unavailable";
+            console.warn(
+              `[Availability] Automatic re-check stopped after ${automaticProcessed}/${entriesForRefresh.length} processed; ${automaticSuccessful} successful and ${deferredCount} deferred (${deferredReason}).`,
+              availabilityConsoleRows(deferredEntries)
+            );
+            if (deferredReason === "timeout") {
+              setAvailabilityWarning(`Availability check timed out after processing ${automaticProcessed}/${entriesForRefresh.length}. Updated ${automaticSuccessful}; deferred ${deferredCount}. Cached values were kept.`);
+            } else if (deferredReason === "rate_limited") {
+              setAvailabilityWarning(`Availability provider is rate limited. Updated ${automaticSuccessful}; deferred ${deferredCount}. Please try again after a few minutes.`);
+            } else {
+              setAvailabilityWarning(`Availability providers are unavailable. Processed ${automaticProcessed}/${entriesForRefresh.length}; updated ${automaticSuccessful}; deferred ${deferredCount}. Cached values were kept.`);
+            }
+            if (options.autoStatus) {
+              markAutoAvailability(options.autoStatus, true);
+            }
+            return false;
           }
-          return false;
         }
         index += chunk.length;
         if (payload.rateLimited) {
-          setAvailabilityWarning("Availability provider is rate limited. Results may be slower or incomplete.");
+          if (automatic) {
+            setAvailabilityWarning("Availability provider is rate limited. Results may be slower or incomplete.");
+          } else {
+            manualRateLimited = true;
+          }
         }
       }
-      if (automatic && options.autoStatus) {
+      if (automatic && automaticDeferredMediaIds.size > 0) {
+        const deferredCount = automaticDeferredMediaIds.size;
+        setAvailabilityWarning(`Availability updated ${automaticSuccessful}/${entriesForRefresh.length}; deferred ${deferredCount} isolated entr${deferredCount === 1 ? "y" : "ies"}. Cached values were kept and deferred entries will retry later.`);
+        console.warn(
+          `[Availability] Automatic re-check completed with ${automaticSuccessful} successful and ${deferredCount} deferred item${deferredCount === 1 ? "" : "s"}.`
+        );
+        if (options.autoStatus) {
+          markAutoAvailability(options.autoStatus, true);
+        }
+      } else if (automatic && options.autoStatus) {
         markAutoAvailability(options.autoStatus);
       }
-      if (!cacheOnly) {
-        console.info(`[Availability] ${automatic ? "Automatic" : "Manual"} re-check completed ${entriesForRefresh.length} item${entriesForRefresh.length === 1 ? "" : "s"}.`);
+      if (!automatic && !cacheOnly && manualFailed > 0) {
+        setAvailabilityWarning(`Availability re-check finished with ${manualSuccessful} successful and ${manualFailed} failed provider lookup${manualFailed === 1 ? "" : "s"}${manualRateLimited ? " after rate limiting" : ""}. Existing values were kept where available. See the developer console for details.`);
       }
-      return true;
+      if (!cacheOnly) {
+        if (automatic) {
+          console.info(`[Availability] Automatic re-check processed ${automaticProcessed}/${entriesForRefresh.length}; ${automaticSuccessful} successful and ${automaticDeferredMediaIds.size} deferred.`);
+        } else {
+          console.info(`[Availability] Manual re-check completed ${entriesForRefresh.length} item${entriesForRefresh.length === 1 ? "" : "s"}.`);
+        }
+      }
+      return !automatic || automaticDeferredMediaIds.size === 0;
     } catch (availabilityError) {
       if (availabilityRunId.current === runId) {
         if (availabilityError.name !== "AbortError") {
+          if (!cacheOnly) {
+            updateDeferredAvailabilityMediaIds(
+              deferredTrackingEntries.slice(nextDeferredTrackingIndex).map((entry) => entry.mediaId)
+            );
+          }
           setAvailabilityWarning(availabilityError.message);
           if (automatic && options.autoStatus) {
             markAutoAvailability(options.autoStatus, true);
@@ -6031,7 +6201,8 @@ function App() {
     const targets = actionTargetEntries();
     const forceAll = mode === "all";
     const eligibleEntries = mode === "missing"
-      ? targets.filter((entry) => isAvailabilityMissing(availability[entry.mediaId]))
+      ? targets.filter((entry) =>
+          isAvailabilityMissing(availability[entry.mediaId]) || deferredAvailabilityMediaIds.has(entry.mediaId))
       : mode === "airing"
         ? targets.filter((entry) => shouldRefreshAiringAvailability(entry, availability[entry.mediaId]))
         : targets;
@@ -6039,16 +6210,20 @@ function App() {
     if (eligibleEntries.length === 0) {
       setAvailabilityWarning(mode === "airing"
         ? "No airing or dub-behind-sub availability entries in the current target set."
-        : "No missing availability entries in the current target set.");
+        : "No missing or deferred availability entries in the current target set.");
       return;
     }
     const entriesToRefresh = forceAll
       ? eligibleEntries.filter((entry) => !isLocalAvailabilityOverride(availability[entry.mediaId]))
-      : eligibleEntries.filter((entry) => !isPermanentAvailability(availability[entry.mediaId]));
+      : eligibleEntries.filter((entry) =>
+          !isPermanentAvailability(availability[entry.mediaId])
+          && !isLocalAvailabilityOverride(availability[entry.mediaId]));
     if (entriesToRefresh.length === 0) {
-      setAvailabilityWarning(forceAll
-        ? "The current target entries are local availability overrides. Clear overrides before rechecking provider availability."
-        : "No non-permanent availability entries in the current target set.");
+      setAvailabilityWarning(mode === "missing"
+        ? "No missing or deferred availability entries in the current target set."
+        : forceAll
+          ? "The current target entries are local availability overrides. Clear overrides before rechecking provider availability."
+          : "No non-permanent availability entries in the current target set.");
       return;
     }
     loadAvailability(entriesToRefresh, true, { force: true, preloadReusableCache: true });
@@ -6087,6 +6262,7 @@ function App() {
       ...currentAvailability,
       [entry.mediaId]: payload.availability
     }));
+    updateDeferredAvailabilityMediaIds([], [entry.mediaId]);
     setOverrideTarget(null);
     refreshOfflineStatus();
   }
@@ -6658,6 +6834,7 @@ function App() {
 
   function removeDeleted(mediaId) {
     removeCachedEntries([mediaId]);
+    updateDeferredAvailabilityMediaIds([], [mediaId]);
     setEntries((currentEntries) => currentEntries.filter((entry) => entry.mediaId !== mediaId));
     setAvailability((currentAvailability) => {
       const next = { ...currentAvailability };

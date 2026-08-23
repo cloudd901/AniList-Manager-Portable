@@ -148,9 +148,9 @@ Availability counts are best-effort metadata. Provider matches can be incomplete
 
 MAL content rating pills such as `PG-13`, `R`, and `R+` are loaded separately from AniList. Successful rating lookups are reused from `data\mal-cache.json` on later loads instead of periodically refetching the rating. Rating lookup failures do not block list loading.
 
-Automatic episode checks load saved counts first, permanently reuse high-confidence completed availability for finished anime, and omit unreleased titles from the provider queue. If the provider is slow or unavailable, the automatic check stops early and keeps the saved counts for a later retry.
+Automatic episode checks load saved counts first, permanently reuse high-confidence completed availability for finished anime, and omit unreleased titles from the provider queue. Provider requests use the direct service first with guarded proxy failover. If the provider is slow, rate limited, or unavailable, the automatic check stops early, keeps saved counts, and remembers deferred titles for a later retry.
 
-`Recheck Episodes` refreshes non-permanent entries and skips cached entries marked as permanent high-confidence matches or local overrides. The refresh dialog can target missing entries, airing or dub-behind-sub entries, or the current target set. Manual checks remain cancellable and can force selected entries to refresh.
+`Recheck Episodes` refreshes non-permanent entries and skips cached entries marked as permanent high-confidence matches or local overrides. The refresh dialog can target missing or previously deferred entries, airing or dub-behind-sub entries, or the current target set. Deferred titles persist in the browser until a provider lookup succeeds or a stable local result replaces them. Manual checks remain cancellable and can force selected entries to refresh.
 
 ## Watch Now Settings
 
